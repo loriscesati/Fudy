@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
+    <title>Low FODMAP Tracker</title>
+
+    <!-- PWA iOS Meta Tags -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="FODMAP">
+    <meta name="theme-color" content="#f3f4f6">
+    <!-- iOS usa questa icona per "Aggiungi a Home", non quella del manifest -->
+    <link rel="apple-touch-icon" href="icon-192.svg">
+    <link rel="manifest" href="manifest.json">
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        * { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+        html, body { height: 100%; overscroll-behavior-y: none; }
+        body {
+            background-color: #f3f4f6;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            padding-top: env(safe-area-inset-top);
+            /* pb-20 esistente + inset reale + margine extra per non ridursi troppo a fine lista */
+            padding-bottom: calc(env(safe-area-inset-bottom) + 6rem);
+        }
+        /* Header: safe-area + margine estra per stare ben sotto la Dynamic Island, non solo a contatto */
+        header { padding-top: calc(env(safe-area-inset-top) + 1rem) !important; }
+        dialog#history-modal {
+            max-height: calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 3rem);
+            margin-top: calc(env(safe-area-inset-top) + 1rem);
+            margin-bottom: calc(env(safe-area-inset-bottom) + 1rem);
+        }
+        /* Il pulsante di chiusura e il contenuto del modal restano lontani dagli angoli arrotondati */
+        #history-modal > div { padding-top: 1.25rem; }
+    </style>
+</head>
+<body class="text-gray-800">
+
+    <!-- Header -->
+    <header class="bg-white shadow-sm sticky top-0 z-50 px-4 py-3 flex justify-between items-center">
+        <div>
+            <h1 class="text-xl font-bold text-emerald-600">FODMAP Tracker</h1>
+            <p class="text-xs text-gray-500" id="current-date-display"></p>
+        </div>
+        <div class="flex gap-2">
+            <button onclick="openHistory()" class="text-xs bg-blue-100 text-blue-700 px-3 py-1 rounded-full font-semibold shadow-sm active:scale-95 transition-transform">Storico</button>
+            <button onclick="resetData()" class="text-xs bg-red-100 text-red-600 px-3 py-1 rounded-full font-semibold shadow-sm active:scale-95 transition-transform">Reset</button>
+        </div>
+    </header>
+
+    <main class="p-4 space-y-6">
+        <!-- Suggerimenti & Cronologia -->
+        <section class="bg-emerald-50 border border-emerald-100 rounded-2xl p-4 shadow-sm">
+            <div class="flex justify-between items-center mb-2">
+                <h2 class="text-sm font-bold text-emerald-800 uppercase tracking-wide flex items-center gap-2">
+                    💡 L'Algoritmo Consiglia
+                </h2>
+                <!-- Toggle manuale pranzo/cena, invece di dedurlo solo dall'ora -->
+                <div class="flex bg-white rounded-full p-0.5 shadow-inner text-[11px] font-bold">
+                    <button id="meal-toggle-pranzo" onclick="setActiveMeal('pranzo')" class="px-2.5 py-1 rounded-full transition-colors">☀️</button>
+                    <button id="meal-toggle-cena" onclick="setActiveMeal('cena')" class="px-2.5 py-1 rounded-full transition-colors">🌙</button>
+                </div>
+            </div>
+            <p class="text-xs text-emerald-700 mb-3 leading-tight">
+                Incrocio tra budget rimanente e assenza nei giorni T-5, T-6, T-7:
+            </p>
+            <div id="suggestions-box" class="flex flex-wrap gap-2 mb-4"></div>
+
+            <h3 class="text-xs font-bold text-gray-500 mb-2 uppercase tracking-wide mt-4 border-t pt-3">
+                ⏪ Storico Recente
+            </h3>
+            <div id="history-box" class="space-y-2 text-xs text-gray-600"></div>
+        </section>
+
+        <!-- Sezione PRANZO -->
+        <section>
+            <h2 class="text-lg font-bold text-gray-800 mb-3 flex items-center gap-2">☀️ Pranzo</h2>
+            <div id="pranzo-grid" class="grid grid-cols-2 gap-3"></div>
+        </section>
+
+        <!-- Sezione CENA -->
+        <section>
+            <h2 class="text-lg font-bold text-gray-800 mb-3 flex items-center gap-2">🌙 Cena</h2>
+            <div id="cena-grid" class="grid grid-cols-2 gap-3"></div>
+        </section>
+    </main>
+
+    <!-- Modal Storico Nativa -->
+    <dialog id="history-modal" class="w-11/12 max-w-md rounded-2xl p-0 backdrop:bg-black/60 backdrop:backdrop-blur-sm shadow-2xl m-auto transition-all overscroll-contain">
+        <div class="p-4 bg-white">
+            <div class="flex justify-between items-center mb-4 pb-2 border-b">
+                <h2 class="text-lg font-bold text-gray-800">Storico Completo</h2>
+                <button onclick="document.getElementById('history-modal').close()" class="bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-full w-8 h-8 flex items-center justify-center font-bold active:scale-90 transition-transform">✕</button>
+            </div>
+            <div id="full-history-list" class="max-h-[60vh] overflow-y-auto space-y-3 text-sm overscroll-contain">
+                <!-- Generato via JS -->
+            </div>
+        </div>
+    </dialog>
+
+    <script>
+        // --- REGISTRAZIONE SERVICE WORKER (file reale, non blob) ---
+        // Il manifest è già collegato via <link rel="manifest"> nell'head.
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('./sw.js').catch(err => console.warn('SW registration failed:', err));
+        }
+
+        // --- CORE LOGIC APP ---
+        const BUDGET = {
+            pranzo: {
+                carne_bianca: { label: "Carne Bianca", emoji: "🍗", limit: 3 },
+                uovo_pranzo: { label: "Uova", emoji: "🥚", limit: 2 },
+                mozzarella: { label: "Mozzarella", emoji: "🧀", limit: 1 },
+                gamberi_calamari: { label: "Gamberi/Cal.", emoji: "🦐", limit: 1 }
+            },
+            cena: {
+                pesce_magro: { label: "Pesce Magro", emoji: "🐟", limit: 2 },
+                pesce_azzurro: { label: "Pesce Azzurro", emoji: "🎣", limit: 1 },
+                salmone_fresco: { label: "Salmone Fresco", emoji: "🍣", limit: 2 },
+                salmone_affumicato: { label: "Salm. Affum.", emoji: "🥓", limit: 1 },
+                carne_rossa: { label: "Carne Rossa", emoji: "🥩", limit: 1 },
+                uovo_cena: { label: "Uova", emoji: "🥚", limit: 1 }
+            }
+        };
+
+        const HISTORY_RETENTION_DAYS = 90;
+
+        let appState = {
+            weekMondayId: "",
+            consumedThisWeek: { pranzo: {}, cena: {} },
+            history: {},
+            activeMeal: null // impostato in loadState in base all'ora, ma modificabile a mano
+        };
+
+        function getLocalISODate(d = new Date()) {
+            return new Date(d.getTime() - (d.getTimezoneOffset() * 60000)).toISOString().split('T')[0];
+        }
+
+        function getMondayString(d) {
+            const date = new Date(d);
+            const day = date.getDay();
+            const diff = date.getDate() - day + (day === 0 ? -6 : 1);
+            return getLocalISODate(new Date(date.setDate(diff)));
+        }
+
+        function pruneHistory() {
+            const cutoff = new Date();
+            cutoff.setDate(cutoff.getDate() - HISTORY_RETENTION_DAYS);
+            const cutoffStr = getLocalISODate(cutoff);
+            Object.keys(appState.history).forEach(date => {
+                if (date < cutoffStr) delete appState.history[date];
+            });
+        }
+
+        function loadState() {
+            const saved = localStorage.getItem('fodmap_state');
+            if (saved) appState = { ...appState, ...JSON.parse(saved) };
+
+            const currentMonday = getMondayString(new Date());
+
+            if (appState.weekMondayId !== currentMonday) {
+                appState.weekMondayId = currentMonday;
+                appState.consumedThisWeek = { pranzo: {}, cena: {} };
+            }
+
+            const today = getLocalISODate();
+            if (!appState.history[today]) {
+                appState.history[today] = { pranzo: [], cena: [] };
+            }
+
+            if (!appState.activeMeal) {
+                appState.activeMeal = new Date().getHours() < 15 ? 'pranzo' : 'cena';
+            }
+
+            pruneHistory();
+            saveState();
+            document.getElementById('current-date-display').innerText = new Date().toLocaleDateString('it-IT', { weekday: 'short', day: 'numeric', month: 'short' });
+        }
+
+        function saveState() {
+            localStorage.setItem('fodmap_state', JSON.stringify(appState));
+            renderUI();
+        }
+
+        function setActiveMeal(meal) {
+            appState.activeMeal = meal;
+            saveState();
+        }
+
+        function addFood(meal, foodId) {
+            if (!appState.consumedThisWeek[meal][foodId]) appState.consumedThisWeek[meal][foodId] = 0;
+            appState.consumedThisWeek[meal][foodId]++;
+            appState.history[getLocalISODate()][meal].push(foodId);
+            saveState();
+        }
+
+        function removeFood(meal, foodId) {
+            if (appState.consumedThisWeek[meal][foodId] > 0) {
+                appState.consumedThisWeek[meal][foodId]--;
+            }
+            const todayArr = appState.history[getLocalISODate()][meal];
+            const index = todayArr.lastIndexOf(foodId);
+            if (index > -1) todayArr.splice(index, 1);
+            saveState();
+        }
+
+        function resetData() {
+            if(confirm("Wipe totale dati locali?")) {
+                localStorage.removeItem('fodmap_state');
+                location.reload();
+            }
+        }
+
+        function getRemaining(meal, foodId, config) {
+            const consumed = appState.consumedThisWeek[meal][foodId] || 0;
+            let remaining = config.limit - consumed;
+
+            // Logica pool condiviso: Max 2 salmoni totali, di cui max 1 affumicato.
+            if (meal === 'cena') {
+                const consFresco = appState.consumedThisWeek.cena.salmone_fresco || 0;
+                const consAffum = appState.consumedThisWeek.cena.salmone_affumicato || 0;
+                const totSalmone = consFresco + consAffum;
+
+                if (foodId === 'salmone_fresco') remaining = 2 - totSalmone;
+                if (foodId === 'salmone_affumicato') remaining = Math.min(1 - consAffum, 2 - totSalmone);
+            }
+            return remaining;
+        }
+
+        function createCard(meal, foodId, config) {
+            const remaining = getRemaining(meal, foodId, config);
+
+            let bg = "bg-white border-gray-200";
+            let text = "text-gray-800";
+            let badge = "bg-green-100 text-green-700";
+
+            if (remaining === 0) { bg = "bg-gray-100 border-gray-300 opacity-60"; badge = "bg-gray-200 text-gray-500"; }
+            else if (remaining < 0) { bg = "bg-red-50 border-red-300"; text = "text-red-700"; badge = "bg-red-200 text-red-800"; }
+
+            return `
+                <div class="border rounded-xl p-3 shadow-sm relative flex flex-col justify-between ${bg} transition-all">
+                    <div class="flex justify-between items-start mb-2">
+                        <span class="text-2xl">${config.emoji}</span>
+                        <span class="text-[10px] font-bold px-2 py-0.5 rounded-full ${badge}">
+                            ${remaining < 0 ? 'Sforato' : 'Rimasti'}: ${remaining}
+                        </span>
+                    </div>
+                    <div class="font-semibold text-xs mb-3 leading-tight truncate ${text}">${config.label}</div>
+                    <div class="flex gap-2">
+                        <button onclick="removeFood('${meal}', '${foodId}')" class="flex-1 bg-gray-200 hover:bg-gray-300 text-gray-700 py-1.5 rounded-lg text-sm font-bold active:scale-95 transition-transform">-</button>
+                        <button onclick="addFood('${meal}', '${foodId}')" class="flex-[2] bg-emerald-500 hover:bg-emerald-600 text-white py-1.5 rounded-lg text-sm font-bold shadow-sm active:scale-95 transition-transform">+</button>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderMealToggle() {
+            const isPranzo = appState.activeMeal === 'pranzo';
+            document.getElementById('meal-toggle-pranzo').className =
+                `px-2.5 py-1 rounded-full transition-colors ${isPranzo ? 'bg-emerald-500 text-white shadow-sm' : 'text-gray-400'}`;
+            document.getElementById('meal-toggle-cena').className =
+                `px-2.5 py-1 rounded-full transition-colors ${!isPranzo ? 'bg-emerald-500 text-white shadow-sm' : 'text-gray-400'}`;
+        }
+
+        function renderAlgoritmo() {
+            const currentMeal = appState.activeMeal;
+            const pastEaten = new Set();
+            let historyHTML = "";
+
+            [5, 6, 7].forEach(days => {
+                let d = new Date();
+                d.setDate(d.getDate() - days);
+                const dateStr = getLocalISODate(d);
+                const record = appState.history[dateStr];
+
+                let text = "Nessun dato";
+                if (record) {
+                    const allEaten = [...record.pranzo, ...record.cena].map(id => {
+                        let label = BUDGET.pranzo[id]?.label || BUDGET.cena[id]?.label;
+                        pastEaten.add(id);
+                        return label;
+                    });
+                    if (allEaten.length > 0) text = allEaten.join(", ");
+                }
+                historyHTML += `<div class="grid grid-cols-[35px_1fr] gap-1"><span class="font-bold text-gray-400">T-${days}</span> <span class="truncate">${text}</span></div>`;
+            });
+            document.getElementById('history-box').innerHTML = historyHTML;
+
+            const suggestions = [];
+            for (const [id, config] of Object.entries(BUDGET[currentMeal])) {
+                const remaining = getRemaining(currentMeal, id, config);
+                if (remaining > 0 && !pastEaten.has(id)) {
+                    suggestions.push(`<span class="bg-white border border-emerald-200 text-emerald-800 text-[10px] font-bold px-2 py-1 rounded-md shadow-sm">${config.emoji} ${config.label}</span>`);
+                }
+            }
+
+            document.getElementById('suggestions-box').innerHTML = suggestions.length > 0
+                ? suggestions.join("")
+                : `<span class="text-xs italic text-emerald-600">Affidati al budget rimanente, non ci sono priorità.</span>`;
+        }
+
+        function renderUI() {
+            document.getElementById('pranzo-grid').innerHTML = Object.entries(BUDGET.pranzo).map(([id, config]) => createCard('pranzo', id, config)).join('');
+            document.getElementById('cena-grid').innerHTML = Object.entries(BUDGET.cena).map(([id, config]) => createCard('cena', id, config)).join('');
+            renderMealToggle();
+            renderAlgoritmo();
+        }
+
+        function openHistory() {
+            const list = document.getElementById('full-history-list');
+            const dates = Object.keys(appState.history).sort().reverse(); // Ordine cronologico decrescente
+
+            if (dates.length === 0) {
+                list.innerHTML = '<p class="text-gray-500 italic text-center py-6">Nessun pasto registrato.</p>';
+            } else {
+                list.innerHTML = dates.map(date => {
+                    const data = appState.history[date];
+                    const pr = data.pranzo.map(id => BUDGET.pranzo[id]?.label || id).join(', ') || '-';
+                    const ce = data.cena.map(id => BUDGET.cena[id]?.label || id).join(', ') || '-';
+
+                    const dateObj = new Date(date);
+                    const dateStr = dateObj.toLocaleDateString('it-IT', { weekday: 'long', day: 'numeric', month: 'short' });
+
+                    return `
+                        <div class="bg-gray-50 rounded-xl p-3 border border-gray-100">
+                            <div class="font-bold text-gray-700 border-b border-gray-200 pb-1 mb-2 capitalize">${dateStr}</div>
+                            <div class="grid grid-cols-[60px_1fr] gap-1 mb-1">
+                                <span class="text-xs font-semibold text-amber-600">Pranzo:</span>
+                                <span class="text-xs text-gray-600">${pr}</span>
+                            </div>
+                            <div class="grid grid-cols-[60px_1fr] gap-1">
+                                <span class="text-xs font-semibold text-indigo-600">Cena:</span>
+                                <span class="text-xs text-gray-600">${ce}</span>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+            }
+            document.getElementById('history-modal').showModal();
+        }
+
+        // Chiudi il modal toccando il backdrop (comportamento atteso su mobile)
+        document.getElementById('history-modal').addEventListener('click', function(e) {
+            if (e.target === this) this.close();
+        });
+
+        loadState();
+    </script>
+</body>
+</html>
