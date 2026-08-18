@@ -1,6 +1,6 @@
 // Service Worker per Low FODMAP Tracker
 // Incrementa CACHE_NAME ad ogni modifica ai file per forzare l'aggiornamento
-const CACHE_NAME = 'fodmap-v1';
+const CACHE_NAME = 'fodmap-v4';
 
 const FILES_TO_CACHE = [
   './',
