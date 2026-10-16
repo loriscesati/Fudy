@@ -5,15 +5,19 @@
  * Integra:
  * 1. Indicatore fase attuale e baseline da IndexedDB
  * 2. Compositore Pasti reali multi-ingrediente con selezione dal Catalogo Alimenti
- * 3. Selezione rapida con preferiti e tracciamento rotazione T-5, T-6, T-7
+ * 3. Selezione rapida con budget settimanale generato dal Catalogo Alimenti
+ *    (ogni alimento con budget attivo compare automaticamente) e rotazione T-5, T-6, T-7
  * 4. Modal Check-in rapido Sintomi (dolore, gonfiore, Bristol, note) salvato in IndexedDB
- * 5. Storico recente pasti con eliminazione e ripetizione rapida
+ * 5. Storico recente pasti
  * 6. Generatore dati demo per testare subito grafici e report
  */
 
 import { openDB, addRecord, uuidv4, getAll } from '../../infrastructure/storage/db.js';
 import { getProfile } from '../../infrastructure/storage/userProfile.js';
 import { getFoods } from '../../domain/foods/foodService.js';
+import { getRemainingPortions } from '../../domain/foods/budgetModel.js';
+import { migrateLegacyBudgetFoods } from '../../domain/foods/budgetMigration.js';
+import { LEGACY_FOOD_SEED } from '../../domain/foods/legacyBudgetSeed.js';
 
 const MEAL_TYPES = [
   { id: 'BREAKFAST', label: 'Colazione', icon: '☕' },
@@ -22,35 +26,33 @@ const MEAL_TYPES = [
   { id: 'DINNER', label: 'Cena', icon: '🌙' },
 ];
 
-const BUDGET = {
-  pranzo: {
-    carne_bianca: { label: "Carne Bianca", emoji: "🍗", limit: 3, fodmap: ['LOW_FODMAP_SAFE'] },
-    uovo_pranzo: { label: "Uova", emoji: "🥚", limit: 2, fodmap: ['LOW_FODMAP_SAFE'] },
-    mozzarella: { label: "Mozzarella", emoji: "🧀", limit: 1, fodmap: ['LACTOSE'] },
-    gamberi_calamari: { label: "Gamberi/Cal.", emoji: "🦐", limit: 1, fodmap: ['LOW_FODMAP_SAFE'] },
-    pasta_frumento: { label: "Pasta Tradiz.", emoji: "🍝", limit: 2, fodmap: ['FRUCTANS_GRAIN'] },
-    legumi_misti: { label: "Legumi", emoji: "🫘", limit: 1, fodmap: ['GOS'] }
-  },
-  cena: {
-    pesce_magro: { label: "Pesce Magro", emoji: "🐟", limit: 2, fodmap: ['LOW_FODMAP_SAFE'] },
-    pesce_azzurro: { label: "Pesce Azzurro", emoji: "🎣", limit: 1, fodmap: ['LOW_FODMAP_SAFE'] },
-    salmone_fresco: { label: "Salmone Fresco", emoji: "🍣", limit: 2, fodmap: ['LOW_FODMAP_SAFE'] },
-    salmone_affumicato: { label: "Salm. Affum.", emoji: "🥓", limit: 1, fodmap: ['LOW_FODMAP_SAFE'] },
-    carne_rossa: { label: "Carne Rossa", emoji: "🥩", limit: 1, fodmap: ['LOW_FODMAP_SAFE'] },
-    uovo_cena: { label: "Uova", emoji: "🥚", limit: 1, fodmap: ['LOW_FODMAP_SAFE'] },
-    mela_frutta: { label: "Mela / Pera", emoji: "🍎", limit: 1, fodmap: ['EXCESS_FRUCTOSE', 'SORBITOL'] },
-    funghi_verdure: { label: "Funghi / Cavolf.", emoji: "🍄", limit: 1, fodmap: ['MANNITOL'] }
-  }
-};
+// La home mostra due griglie (pranzo/cena); ciascuna corrisponde a uno slot del budget.
+const MEAL_SLOT = { pranzo: 'LUNCH', cena: 'DINNER' };
+const SLOT_MEAL = { LUNCH: 'pranzo', DINNER: 'cena' };
+const MEAL_KEYS = ['pranzo', 'cena'];
 
 const HISTORY_RETENTION_DAYS = 90;
+const STATE_KEYS_VERSION = 2;
+
+// Alimenti con budget attivo, caricati dal catalogo a ogni render.
+let budgetFoods = [];
 
 let appState = {
   weekMondayId: "",
   consumedThisWeek: { pranzo: {}, cena: {} },
   history: {},
-  activeMeal: null
+  activeMeal: null,
+  keysVersion: 1
 };
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 
 function getLocalISODate(d = new Date()) {
   return new Date(d.getTime() - (d.getTimezoneOffset() * 60000)).toISOString().split('T')[0];
@@ -70,6 +72,10 @@ function pruneHistory() {
   Object.keys(appState.history).forEach(date => {
     if (date < cutoffStr) delete appState.history[date];
   });
+}
+
+function saveLocalState() {
+  localStorage.setItem('fodmap_state', JSON.stringify(appState));
 }
 
 function loadLocalState() {
@@ -94,26 +100,77 @@ function loadLocalState() {
   }
 
   pruneHistory();
-  localStorage.setItem('fodmap_state', JSON.stringify(appState));
+  saveLocalState();
 }
 
-function getRemaining(meal, foodId, config) {
-  const consumed = appState.consumedThisWeek[meal]?.[foodId] || 0;
-  let remaining = config.limit - consumed;
+/**
+ * Converte i vecchi identificativi (es. 'uovo_pranzo', 'salmone_fresco')
+ * negli ID degli alimenti del catalogo. Eseguita una sola volta.
+ */
+function migrateLegacyConsumptionKeys() {
+  if (appState.keysVersion >= STATE_KEYS_VERSION) return;
 
-  if (meal === 'cena') {
-    const consFresco = appState.consumedThisWeek.cena?.salmone_fresco || 0;
-    const consAffum = appState.consumedThisWeek.cena?.salmone_affumicato || 0;
-    const totSalmone = consFresco + consAffum;
+  const keyMap = { pranzo: {}, cena: {} };
+  LEGACY_FOOD_SEED.forEach(seed => {
+    Object.entries(seed.legacyKeys || {}).forEach(([slot, legacyKey]) => {
+      const meal = SLOT_MEAL[slot];
+      if (meal) keyMap[meal][legacyKey] = seed.id;
+    });
+  });
 
-    if (foodId === 'salmone_fresco') remaining = 2 - totSalmone;
-    if (foodId === 'salmone_affumicato') remaining = Math.min(1 - consAffum, 2 - totSalmone);
-  }
-  return remaining;
+  MEAL_KEYS.forEach(meal => {
+    const migrated = {};
+    Object.entries(appState.consumedThisWeek?.[meal] || {}).forEach(([key, count]) => {
+      const id = keyMap[meal][key] || key;
+      migrated[id] = (migrated[id] || 0) + count;
+    });
+    if (!appState.consumedThisWeek) appState.consumedThisWeek = { pranzo: {}, cena: {} };
+    appState.consumedThisWeek[meal] = migrated;
+  });
+
+  Object.values(appState.history || {}).forEach(day => {
+    MEAL_KEYS.forEach(meal => {
+      day[meal] = (day[meal] || []).map(key => keyMap[meal][key] || key);
+    });
+  });
+
+  appState.keysVersion = STATE_KEYS_VERSION;
+  saveLocalState();
+}
+
+function foodsForMeal(meal) {
+  const slot = MEAL_SLOT[meal];
+  return budgetFoods.filter(f => f.budget?.weeklyLimits?.[slot] !== undefined);
+}
+
+function getRemaining(meal, food) {
+  const consumed = appState.consumedThisWeek[meal] || {};
+  const remaining = getRemainingPortions(food, MEAL_SLOT[meal], consumed, budgetFoods);
+  return remaining === null ? 0 : remaining;
+}
+
+function foodLabel(food) {
+  return food.budget?.shortLabel || food.name;
+}
+
+function registerConsumption(meal, foodId) {
+  if (!appState.consumedThisWeek[meal]) appState.consumedThisWeek[meal] = {};
+  appState.consumedThisWeek[meal][foodId] = (appState.consumedThisWeek[meal][foodId] || 0) + 1;
+
+  const today = getLocalISODate();
+  if (!appState.history[today]) appState.history[today] = { pranzo: [], cena: [] };
+  if (!appState.history[today][meal]) appState.history[today][meal] = [];
+  appState.history[today][meal].push(foodId);
 }
 
 export async function render(rootElement) {
+  // 1. Il catalogo e' la fonte unica: migra le vecchie voci della home e carica gli alimenti con budget.
+  await migrateLegacyBudgetFoods();
+  budgetFoods = await getFoods({ budgetOnly: true });
+
   loadLocalState();
+  migrateLegacyConsumptionKeys();
+
   const profile = await getProfile();
 
   const phaseNames = {
@@ -379,8 +436,8 @@ export async function render(rootElement) {
     const cGrid = document.getElementById('cena-grid');
     if (!pGrid || !cGrid) return;
 
-    pGrid.innerHTML = Object.entries(BUDGET.pranzo).map(([id, config]) => createCardHTML('pranzo', id, config)).join('');
-    cGrid.innerHTML = Object.entries(BUDGET.cena).map(([id, config]) => createCardHTML('cena', id, config)).join('');
+    pGrid.innerHTML = renderGridHTML('pranzo');
+    cGrid.innerHTML = renderGridHTML('cena');
 
     rootElement.querySelectorAll('[data-action="add"]').forEach(btn => {
       btn.onclick = () => handleAddFood(btn.dataset.meal, btn.dataset.foodId);
@@ -390,8 +447,20 @@ export async function render(rootElement) {
     });
   }
 
-  function createCardHTML(meal, foodId, config) {
-    const remaining = getRemaining(meal, foodId, config);
+  function renderGridHTML(meal) {
+    const foods = foodsForMeal(meal);
+    if (foods.length === 0) {
+      return `
+        <p class="col-span-full text-center text-xs text-gray-400 italic py-3">
+          Nessun alimento con budget per questo pasto.
+          <a href="#alimenti" class="text-emerald-600 font-bold underline">Aggiungi un alimento</a>
+        </p>`;
+    }
+    return foods.map(food => createCardHTML(meal, food)).join('');
+  }
+
+  function createCardHTML(meal, food) {
+    const remaining = getRemaining(meal, food);
     let bg = "bg-white border-gray-200";
     let text = "text-gray-800";
     let badge = "bg-emerald-100 text-emerald-700";
@@ -405,18 +474,20 @@ export async function render(rootElement) {
       badge = "bg-red-200 text-red-800";
     }
 
+    const safeId = escapeHtml(food.id);
+
     return `
       <div class="border rounded-xl p-2.5 shadow-2xs relative flex flex-col justify-between ${bg} transition-all">
         <div class="flex justify-between items-start mb-1">
-          <span class="text-xl">${config.emoji}</span>
+          <span class="text-xl">${escapeHtml(food.budget?.emoji || '🍽️')}</span>
           <span class="text-[9px] font-bold px-1.5 py-0.5 rounded-full ${badge}">
             ${remaining < 0 ? 'Sforato' : 'Rimasti'}: ${remaining}
           </span>
         </div>
-        <div class="font-semibold text-xs mb-1.5 leading-tight truncate ${text}">${config.label}</div>
+        <div class="font-semibold text-xs mb-1.5 leading-tight truncate ${text}">${escapeHtml(foodLabel(food))}</div>
         <div class="flex gap-1.5">
-          <button data-action="remove" data-meal="${meal}" data-food-id="${foodId}" class="flex-1 bg-gray-100 hover:bg-gray-200 text-gray-700 py-1 rounded-lg text-xs font-bold active:scale-95 transition-transform">-</button>
-          <button data-action="add" data-meal="${meal}" data-food-id="${foodId}" class="flex-[2] bg-emerald-600 hover:bg-emerald-700 text-white py-1 rounded-lg text-xs font-bold shadow-2xs active:scale-95 transition-transform">+</button>
+          <button data-action="remove" data-meal="${meal}" data-food-id="${safeId}" class="flex-1 bg-gray-100 hover:bg-gray-200 text-gray-700 py-1 rounded-lg text-xs font-bold active:scale-95 transition-transform">-</button>
+          <button data-action="add" data-meal="${meal}" data-food-id="${safeId}" class="flex-[2] bg-emerald-600 hover:bg-emerald-700 text-white py-1 rounded-lg text-xs font-bold shadow-2xs active:scale-95 transition-transform">+</button>
         </div>
       </div>
     `;
@@ -426,6 +497,7 @@ export async function render(rootElement) {
     const currentMeal = appState.activeMeal || 'pranzo';
     const pastEaten = new Set();
     let historyHTML = "";
+    const foodById = new Map(budgetFoods.map(f => [f.id, f]));
 
     [5, 6, 7].forEach(days => {
       let d = new Date();
@@ -436,26 +508,25 @@ export async function render(rootElement) {
       let text = "Nessun dato";
       if (record) {
         const allEaten = [...(record.pranzo || []), ...(record.cena || [])].map(id => {
-          let label = BUDGET.pranzo[id]?.label || BUDGET.cena[id]?.label || id;
           pastEaten.add(id);
-          return label;
+          const food = foodById.get(id);
+          return food ? foodLabel(food) : 'Alimento rimosso';
         });
         if (allEaten.length > 0) text = allEaten.join(", ");
       }
-      historyHTML += `<div class="grid grid-cols-[35px_1fr] gap-1 text-[11px]"><span class="font-bold text-gray-400">T-${days}</span> <span class="truncate">${text}</span></div>`;
+      historyHTML += `<div class="grid grid-cols-[35px_1fr] gap-1 text-[11px]"><span class="font-bold text-gray-400">T-${days}</span> <span class="truncate">${escapeHtml(text)}</span></div>`;
     });
 
     const hBox = document.getElementById('history-box');
     if (hBox) hBox.innerHTML = historyHTML;
 
     const suggestions = [];
-    const mealDict = BUDGET[currentMeal] || {};
-    for (const [id, config] of Object.entries(mealDict)) {
-      const remaining = getRemaining(currentMeal, id, config);
-      if (remaining > 0 && !pastEaten.has(id)) {
-        suggestions.push(`<span class="bg-white border border-emerald-200 text-emerald-800 text-[10px] font-bold px-2 py-0.5 rounded-md shadow-2xs">${config.emoji} ${config.label}</span>`);
+    foodsForMeal(currentMeal).forEach(food => {
+      const remaining = getRemaining(currentMeal, food);
+      if (remaining > 0 && !pastEaten.has(food.id)) {
+        suggestions.push(`<span class="bg-white border border-emerald-200 text-emerald-800 text-[10px] font-bold px-2 py-0.5 rounded-md shadow-2xs">${escapeHtml(food.budget?.emoji || '')} ${escapeHtml(foodLabel(food))}</span>`);
       }
-    }
+    });
 
     const sBox = document.getElementById('suggestions-box');
     if (sBox) {
@@ -489,7 +560,7 @@ export async function render(rootElement) {
         const timeStr = m.timestamp ? new Date(m.timestamp).toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit' }) : '';
         const typeObj = MEAL_TYPES.find(t => t.id === m.mealType) || { label: m.mealType, icon: '🍽️' };
         const items = m.items || [];
-        const itemsNames = items.map(i => `${i.foodName} (${i.consumedPortion?.amount || 1}${i.consumedPortion?.unit || 'porz'})`).join(', ');
+        const itemsNames = items.map(i => `${escapeHtml(i.foodName)} (${i.consumedPortion?.amount || 1}${escapeHtml(i.consumedPortion?.unit || 'porz')})`).join(', ');
 
         return `
           <div class="p-2.5 bg-gray-50 border border-gray-100 rounded-xl flex justify-between items-start gap-2">
@@ -501,7 +572,7 @@ export async function render(rootElement) {
                 ${m.isEatingOut ? '<span class="text-[9px] bg-amber-100 text-amber-800 px-1 rounded font-bold">fuori casa</span>' : ''}
               </div>
               <p class="text-[11px] text-gray-600 mt-0.5">${itemsNames || 'Nessun ingrediente'}</p>
-              ${m.notes ? `<p class="text-[10px] text-gray-400 italic mt-0.5">${m.notes}</p>` : ''}
+              ${m.notes ? `<p class="text-[10px] text-gray-400 italic mt-0.5">${escapeHtml(m.notes)}</p>` : ''}
             </div>
           </div>
         `;
@@ -513,30 +584,27 @@ export async function render(rootElement) {
 
   // Aggiunta pasto rapido dai bottoni del tracker
   async function handleAddFood(meal, foodId) {
-    if (!appState.consumedThisWeek[meal]) appState.consumedThisWeek[meal] = {};
-    appState.consumedThisWeek[meal][foodId] = (appState.consumedThisWeek[meal][foodId] || 0) + 1;
+    const food = budgetFoods.find(f => f.id === foodId);
+    if (!food) return;
 
-    const today = getLocalISODate();
-    if (!appState.history[today]) appState.history[today] = { pranzo: [], cena: [] };
-    appState.history[today][meal].push(foodId);
-
-    localStorage.setItem('fodmap_state', JSON.stringify(appState));
+    registerConsumption(meal, foodId);
+    saveLocalState();
     renderAll();
 
     // Persistenza nello store `meals`
     try {
-      const config = BUDGET[meal]?.[foodId] || { label: foodId, fodmap: ['LOW_FODMAP_SAFE'] };
+      const portion = food.tolerance?.maxToleratedPortion || { amount: 100, unit: 'g' };
       const mealRecord = {
         id: uuidv4(),
         timestamp: new Date().toISOString(),
-        mealType: meal === 'pranzo' ? 'LUNCH' : 'DINNER',
+        mealType: MEAL_SLOT[meal],
         isEatingOut: false,
         notes: '',
         items: [{
-          foodId: foodId,
-          foodName: config.label,
-          fodmapGroupsSnapshot: config.fodmap || ['LOW_FODMAP_SAFE'],
-          consumedPortion: { amount: 100, unit: 'g' },
+          foodId: food.id,
+          foodName: food.name,
+          fodmapGroupsSnapshot: food.primaryFodmapGroup || ['LOW_FODMAP_SAFE'],
+          consumedPortion: { amount: portion.amount || 100, unit: portion.unit || 'g' },
           preparationUsed: 'standard',
           isEstimated: false
         }]
@@ -557,19 +625,19 @@ export async function render(rootElement) {
     const index = todayArr.lastIndexOf(foodId);
     if (index > -1) todayArr.splice(index, 1);
 
-    localStorage.setItem('fodmap_state', JSON.stringify(appState));
+    saveLocalState();
     renderAll();
   }
 
   // Toggle meal
   document.getElementById('toggle-pranzo')?.addEventListener('click', () => {
     appState.activeMeal = 'pranzo';
-    localStorage.setItem('fodmap_state', JSON.stringify(appState));
+    saveLocalState();
     renderAll();
   });
   document.getElementById('toggle-cena')?.addEventListener('click', () => {
     appState.activeMeal = 'cena';
-    localStorage.setItem('fodmap_state', JSON.stringify(appState));
+    saveLocalState();
     renderAll();
   });
 
@@ -622,32 +690,28 @@ export async function render(rootElement) {
           </div>
         `;
       } else {
-        searchResultsDiv.innerHTML = foods.map(f => {
-          const portion = f.tolerance?.maxToleratedPortion || { amount: 100, unit: 'g' };
-          return `
-            <div class="p-2.5 hover:bg-emerald-50 cursor-pointer flex justify-between items-center composer-search-item" data-food='${JSON.stringify({
-              foodId: f.id,
-              foodName: f.name,
-              fodmapGroupsSnapshot: f.primaryFodmapGroup || ['LOW_FODMAP_SAFE'],
-              consumedPortion: portion,
-              preparationUsed: 'standard',
-              isEstimated: false
-            })}'>
-              <div>
-                <span class="font-bold text-gray-800 text-xs">${f.name}</span>
-                <span class="text-[10px] text-gray-400 block">${(f.primaryFodmapGroup || []).join(', ')}</span>
-              </div>
-              <span class="text-xs bg-emerald-100 text-emerald-800 font-bold px-2 py-1 rounded-md">+ Aggiungi</span>
+        searchResultsDiv.innerHTML = foods.map((f, index) => `
+          <div class="p-2.5 hover:bg-emerald-50 cursor-pointer flex justify-between items-center composer-search-item" data-index="${index}">
+            <div>
+              <span class="font-bold text-gray-800 text-xs">${escapeHtml(f.name)}</span>
+              <span class="text-[10px] text-gray-400 block">${escapeHtml((f.primaryFodmapGroup || []).join(', '))}</span>
             </div>
-          `;
-        }).join('');
+            <span class="text-xs bg-emerald-100 text-emerald-800 font-bold px-2 py-1 rounded-md">+ Aggiungi</span>
+          </div>
+        `).join('');
 
         searchResultsDiv.querySelectorAll('.composer-search-item').forEach(el => {
           el.addEventListener('click', () => {
-            const foodData = JSON.parse(el.getAttribute('data-food'));
+            const f = foods[parseInt(el.dataset.index, 10)];
+            if (!f) return;
+            const portion = f.tolerance?.maxToleratedPortion || { amount: 100, unit: 'g' };
             composerSelectedItems.push({
-              ...foodData,
-              consumedPortion: { ...foodData.consumedPortion }
+              foodId: f.id,
+              foodName: f.name,
+              fodmapGroupsSnapshot: f.primaryFodmapGroup || ['LOW_FODMAP_SAFE'],
+              consumedPortion: { amount: portion.amount || 100, unit: portion.unit || 'g' },
+              preparationUsed: 'standard',
+              isEstimated: false
             });
             renderComposerSelectedItems();
             searchInput.value = '';
@@ -669,12 +733,12 @@ export async function render(rootElement) {
     selectedItemsDiv.innerHTML = composerSelectedItems.map((item, idx) => `
       <div class="flex items-center justify-between p-2 bg-white border border-gray-200 rounded-lg text-xs">
         <div class="flex-1 mr-2">
-          <span class="font-bold text-gray-800">${item.foodName}</span>
-          <span class="text-[10px] text-gray-400 block">${item.fodmapGroupsSnapshot.join(', ')}</span>
+          <span class="font-bold text-gray-800">${escapeHtml(item.foodName)}</span>
+          <span class="text-[10px] text-gray-400 block">${escapeHtml(item.fodmapGroupsSnapshot.join(', '))}</span>
         </div>
         <div class="flex items-center gap-1.5">
           <input type="number" min="1" value="${item.consumedPortion.amount || 100}" class="w-16 p-1 border border-gray-200 rounded text-center text-xs font-semibold composer-item-amount" data-idx="${idx}">
-          <span class="text-gray-500 text-xs">${item.consumedPortion.unit || 'g'}</span>
+          <span class="text-gray-500 text-xs">${escapeHtml(item.consumedPortion.unit || 'g')}</span>
           <button type="button" class="text-red-500 hover:text-red-700 font-bold px-1.5 py-0.5 ml-1 composer-remove-item" data-idx="${idx}">✕</button>
         </div>
       </div>
@@ -727,6 +791,19 @@ export async function render(rootElement) {
 
     try {
       await addRecord('meals', mealRecord);
+
+      // Coerenza: un pasto del compositore consuma anche il budget settimanale degli alimenti con budget attivo.
+      const meal = SLOT_MEAL[mealType];
+      if (meal) {
+        composerSelectedItems.forEach(item => {
+          if (budgetFoods.some(f => f.id === item.foodId)) {
+            registerConsumption(meal, item.foodId);
+          }
+        });
+        saveLocalState();
+        renderAll();
+      }
+
       composerModal.close();
       await refreshTodayMeals();
       alert("Pasto registrato con successo nel diario!");
@@ -754,7 +831,7 @@ export async function render(rootElement) {
           const dateStr = dateObj.toLocaleDateString('it-IT', { weekday: 'short', day: 'numeric', month: 'short' });
           const timeStr = dateObj.toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit' });
           const typeObj = MEAL_TYPES.find(t => t.id === m.mealType) || { label: m.mealType, icon: '🍽️' };
-          const itemsStr = (m.items || []).map(i => `${i.foodName} (${i.consumedPortion?.amount || 1}${i.consumedPortion?.unit || 'porz'})`).join(', ');
+          const itemsStr = (m.items || []).map(i => `${escapeHtml(i.foodName)} (${i.consumedPortion?.amount || 1}${escapeHtml(i.consumedPortion?.unit || 'porz')})`).join(', ');
 
           return `
             <div class="bg-gray-50 rounded-xl p-2.5 border border-gray-100 text-xs">
@@ -763,7 +840,7 @@ export async function render(rootElement) {
                 ${m.isEatingOut ? '<span class="text-[9px] bg-amber-100 text-amber-800 px-1 rounded font-bold">fuori casa</span>' : ''}
               </div>
               <p class="text-gray-600">${itemsStr || 'Nessun ingrediente'}</p>
-              ${m.notes ? `<p class="text-[10px] text-gray-400 italic mt-0.5">${m.notes}</p>` : ''}
+              ${m.notes ? `<p class="text-[10px] text-gray-400 italic mt-0.5">${escapeHtml(m.notes)}</p>` : ''}
             </div>
           `;
         }).join('');

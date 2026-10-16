@@ -83,6 +83,8 @@ export function normalizeBudget(input, context = {}) {
 
 /**
  * Porzioni rimanenti in questa settimana per un alimento e un pasto.
+ * Il valore puo' essere negativo: indica quante porzioni sono state
+ * consumate oltre il limite (la home lo mostra come "Sforato").
  *
  * @param {Object} food  alimento con campo budget
  * @param {string} slot  'LUNCH' | 'DINNER' | ...
@@ -106,5 +108,5 @@ export function getRemainingPortions(food, slot, consumed = {}, allFoods = []) {
     remaining = Math.min(remaining, shared.weeklyLimits[slot] - groupTotal);
   }
 
-  return Math.max(remaining, 0);
+  return remaining;
 }
