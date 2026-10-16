@@ -1,6 +1,8 @@
 // Service Worker per FODMAP Path PWA
-// Incrementa CACHE_NAME ad ogni modifica per forzare il refresh
-const CACHE_NAME = 'fodmap-path-v8';
+// Per ogni release modifica APP_VERSION: cambia il file e forza il refresh
+const APP_VERSION = '2.1';
+const CACHE_PREFIX = 'fodmap-path-';
+const CACHE_NAME = `${CACHE_PREFIX}v${APP_VERSION}`;
 
 const FILES_TO_CACHE = [
   './',
@@ -23,7 +25,6 @@ const FILES_TO_CACHE = [
   './src/ui/pages/progressi.js'
 ];
 
-// In ascolto del messaggio SKIP_WAITING inviato dal client o dalla UI di update
 self.addEventListener('message', (event) => {
   if (event.data && event.data.type === 'SKIP_WAITING') {
     self.skipWaiting();
@@ -31,52 +32,53 @@ self.addEventListener('message', (event) => {
 });
 
 self.addEventListener('install', (event) => {
-  // Pre-caching di tutti gli asset statici dell'applicazione
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(FILES_TO_CACHE))
+    caches
+      .open(CACHE_NAME)
+      .then((cache) => cache.addAll(FILES_TO_CACHE))
+      .then(() => self.skipWaiting())
   );
 });
 
 self.addEventListener('activate', (event) => {
-  // Eliminazione di tutte le vecchie cache non corrispondenti alla versione corrente
+  // Elimina solo le vecchie cache dell'app; IndexedDB non viene toccato
   event.waitUntil(
-    caches.keys().then((keys) =>
-      Promise.all(
-        keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))
+    caches
+      .keys()
+      .then((keys) =>
+        Promise.all(
+          keys
+            .filter((key) => key.startsWith(CACHE_PREFIX) && key !== CACHE_NAME)
+            .map((key) => caches.delete(key))
+        )
       )
-    ).then(() => self.clients.claim())
+      .then(() => self.clients.claim())
   );
 });
 
 self.addEventListener('fetch', (event) => {
-  // Gestione solo richieste GET
   if (event.request.method !== 'GET') return;
 
   const requestUrl = new URL(event.request.url);
+  if (requestUrl.origin !== self.location.origin) return;
 
-  // Strategia Network-First con fallback su cache per documenti HTML e script locali
+  // Network-first con fallback su cache
   event.respondWith(
-    fetch(event.request)
+    fetch(event.request, {
+      cache: event.request.mode === 'navigate' ? 'no-store' : 'default'
+    })
       .then((networkResponse) => {
-        // Se la risposta è valida, aggiorna la cache asincronamente
         if (networkResponse && networkResponse.status === 200) {
           const responseToCache = networkResponse.clone();
-          caches.open(CACHE_NAME).then((cache) => {
-            cache.put(event.request, responseToCache);
-          });
+          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, responseToCache));
         }
         return networkResponse;
       })
       .catch(async () => {
-        // In caso di assenza di rete (offline), recupera dalla cache
         const cachedResponse = await caches.match(event.request);
-        if (cachedResponse) {
-          return cachedResponse;
-        }
-        // Fallback per navigazioni SPA
-        if (event.request.mode === 'navigate') {
-          return caches.match('./index.html');
-        }
+        if (cachedResponse) return cachedResponse;
+        if (event.request.mode === 'navigate') return caches.match('./index.html');
+        return Response.error();
       })
   );
 });
