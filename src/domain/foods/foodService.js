@@ -5,9 +5,13 @@
  * Fornisce operazioni CRUD e ricerca tipizzata sullo store IndexedDB 'foods'.
  * Non inserisce dati fittizi o proprietari: lascia il database vuoto
  * pronto per l'inserimento dell'utente o per l'importazione di un database personale.
+ *
+ * Ogni alimento ha un campo `budget` (vedi budgetModel.js): un alimento nuovo
+ * viene abilitato di default, cosi' compare subito nella home.
  */
 
 import { openDB, uuidv4, addRecord, updateRecord, deleteRecord, getRecord } from '../../infrastructure/storage/db.js';
+import { normalizeBudget } from './budgetModel.js';
 
 export const FODMAP_GROUPS = [
   { id: 'LOW_FODMAP_SAFE', label: 'Basso FODMAP (Sicuro)', color: '#10B981' },
@@ -43,7 +47,7 @@ export const TOLERANCE_STATUSES = [
 
 /**
  * Recupera tutti gli alimenti non archiviati.
- * @param {Object} options - Filtri opzionali (searchQuery, category, fodmapGroup, toleranceStatus)
+ * @param {Object} options - Filtri opzionali (searchQuery, category, fodmapGroup, toleranceStatus, budgetOnly)
  * @returns {Promise<Array>}
  */
 export async function getFoods(options = {}) {
@@ -84,6 +88,11 @@ export async function getFoods(options = {}) {
         foods = foods.filter((f) => (f.tolerance?.status || 'UNTESTED') === options.toleranceStatus);
       }
 
+      // Solo alimenti con budget attivo (usato dalla home)
+      if (options.budgetOnly) {
+        foods = foods.filter((f) => f.budget?.enabled);
+      }
+
       // Ordina alfabeticamente per nome
       foods.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
 
@@ -107,6 +116,8 @@ export async function getFoodById(id) {
 export async function saveFood(foodData) {
   const now = new Date().toISOString();
   const id = foodData.id || uuidv4();
+  const category = foodData.category || 'VEGETABLE';
+  const categoryIcon = FOOD_CATEGORIES.find((c) => c.id === category)?.icon;
 
   const record = {
     id,
@@ -114,7 +125,7 @@ export async function saveFood(foodData) {
     synonyms: Array.isArray(foodData.synonyms)
       ? foodData.synonyms
       : (foodData.synonyms || '').split(',').map((s) => s.trim()).filter(Boolean),
-    category: foodData.category || 'VEGETABLE',
+    category,
     preparation: foodData.preparation || ['RAW', 'COOKED'],
     primaryFodmapGroup: foodData.primaryFodmapGroup || ['LOW_FODMAP_SAFE'],
     isGlutenFree: !!foodData.isGlutenFree,
@@ -133,6 +144,7 @@ export async function saveFood(foodData) {
       evidenceLevel: foodData.tolerance?.evidenceLevel || 'HYPOTHESIS',
       personalNotes: foodData.tolerance?.personalNotes || ''
     },
+    budget: normalizeBudget(foodData.budget, { name: foodData.name, categoryIcon }),
     isArchived: false,
     createdAt: foodData.createdAt || now,
     updatedAt: now
