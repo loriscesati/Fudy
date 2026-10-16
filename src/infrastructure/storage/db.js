@@ -1,112 +1,107 @@
 /**
  * src/infrastructure/storage/db.js
  *
- * IndexedDB wrapper for FODMAP Path local‑first storage.
- * Provides async CRUD helpers for the domain stores defined in the
- * specification (foods, meals, symptoms, bowel_events, challenges,
- * cycle_logs, confounders, user_profile).
- *
- * Uses the `idb` library pattern – a tiny promisified wrapper –
- * but implements only the needed functionality without external
- * dependencies, ensuring the app works offline.
+ * IndexedDB wrapper for FODMAP Path local-first storage.
+ * Stores: foods, meals, symptoms, bowel_events, challenges,
+ * cycle_logs, confounders, user_profile.
+ * No external dependencies; works offline.
  */
 
 const DB_NAME = 'fodmap-path-db';
 const DB_VERSION = 1; // Increment when schema changes
 
-/**
- * Open (or create) the IndexedDB database. Returns a Promise that
- * resolves with the `IDBDatabase` instance.
- */
+let dbPromise = null;
+
+/** Open (or reuse) the single shared IndexedDB connection. */
 export function openDB() {
-  return new Promise((resolve, reject) => {
+  if (dbPromise) return dbPromise;
+  dbPromise = new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
-    request.onupgradeneeded = (event) => {
+
+    request.onupgradeneeded = () => {
       const db = request.result;
-      // -- Object stores ---------------------------------------------------
-      const foods = db.createObjectStore('foods', { keyPath: 'id' });
-      foods.createIndex('name', 'name', { unique: false });
-      foods.createIndex('category', 'category', { unique: false });
-      foods.createIndex('status', 'tolerance.status', { unique: false });
-      foods.createIndex('archived', 'isArchived', { unique: false });
+      const ensure = (name, options) =>
+        db.objectStoreNames.contains(name)
+          ? request.transaction.objectStore(name)
+          : db.createObjectStore(name, options);
+      const index = (store, name, path) => {
+        if (!store.indexNames.contains(name)) store.createIndex(name, path, { unique: false });
+      };
 
-      const meals = db.createObjectStore('meals', { keyPath: 'id' });
-      meals.createIndex('timestamp', 'timestamp', { unique: false });
-      meals.createIndex('mealType', 'mealType', { unique: false });
-      meals.createIndex('isEatingOut', 'isEatingOut', { unique: false });
+      const foods = ensure('foods', { keyPath: 'id' });
+      index(foods, 'name', 'name');
+      index(foods, 'category', 'category');
+      index(foods, 'status', 'tolerance.status');
+      index(foods, 'archived', 'isArchived');
 
-      const symptoms = db.createObjectStore('symptoms', { keyPath: 'id' });
-      symptoms.createIndex('timestamp', 'timestamp');
-      symptoms.createIndex('type', 'type');
+      const meals = ensure('meals', { keyPath: 'id' });
+      index(meals, 'timestamp', 'timestamp');
+      index(meals, 'mealType', 'mealType');
+      index(meals, 'isEatingOut', 'isEatingOut');
 
-      const bowel = db.createObjectStore('bowel_events', { keyPath: 'id' });
-      bowel.createIndex('timestamp', 'timestamp');
-      bowel.createIndex('bristolType', 'bristolType');
+      const symptoms = ensure('symptoms', { keyPath: 'id' });
+      index(symptoms, 'timestamp', 'timestamp');
+      index(symptoms, 'type', 'type');
 
-      const challenges = db.createObjectStore('challenges', { keyPath: 'id' });
-      challenges.createIndex('state', 'state');
-      challenges.createIndex('fodmapGroup', 'fodmapGroup');
-      challenges.createIndex('startDate', 'startDate');
+      const bowel = ensure('bowel_events', { keyPath: 'id' });
+      index(bowel, 'timestamp', 'timestamp');
+      index(bowel, 'bristolType', 'bristolType');
 
-      const cycles = db.createObjectStore('cycle_logs', { keyPath: 'date' });
-      cycles.createIndex('cycleDay', 'cycleDay');
-      cycles.createIndex('menstrualFlow', 'menstrualFlow');
+      const challenges = ensure('challenges', { keyPath: 'id' });
+      index(challenges, 'state', 'state');
+      index(challenges, 'fodmapGroup', 'fodmapGroup');
+      index(challenges, 'startDate', 'startDate');
 
-      const conf = db.createObjectStore('confounders', { keyPath: 'date' });
-      conf.createIndex('stressLevel', 'stressLevel');
+      const cycles = ensure('cycle_logs', { keyPath: 'date' });
+      index(cycles, 'cycleDay', 'cycleDay');
+      index(cycles, 'menstrualFlow', 'menstrualFlow');
 
-      const profile = db.createObjectStore('user_profile', { keyPath: 'key' });
+      const conf = ensure('confounders', { keyPath: 'date' });
+      index(conf, 'stressLevel', 'stressLevel');
+
+      ensure('user_profile', { keyPath: 'key' });
     };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+
+    request.onsuccess = () => {
+      const db = request.result;
+      db.onversionchange = () => {
+        db.close();
+        dbPromise = null;
+      };
+      resolve(db);
+    };
+    request.onerror = () => {
+      dbPromise = null;
+      reject(request.error);
+    };
+    request.onblocked = () => {
+      console.warn('Aggiornamento database bloccato: chiudi le altre schede di Fudy.');
+    };
   });
+  return dbPromise;
 }
 
-/** Generic helper to perform a transaction */
-function tx(storeName, mode = 'readonly') {
-  return openDB().then((db) => {
-    const tx = db.transaction(storeName, mode);
-    const store = tx.objectStore(storeName);
-    return { tx, store };
+/** Run one transaction and resolve only after it has committed. */
+async function run(storeName, mode, action) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(storeName, mode);
+    const store = transaction.objectStore(storeName);
+    let result;
+    const request = action(store);
+    if (request) request.onsuccess = () => { result = request.result; };
+    transaction.oncomplete = () => resolve(result);
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error || new Error('Transazione annullata'));
   });
 }
 
 // ---------- CRUD helpers ---------------------------------------------------
-export async function addRecord(storeName, record) {
-  const { tx, store } = await tx(storeName, 'readwrite');
-  store.add(record);
-  return tx.complete;
-}
-
-export async function getRecord(storeName, key) {
-  const { tx, store } = await tx(storeName);
-  return new Promise((resolve, reject) => {
-    const request = store.get(key);
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-export async function updateRecord(storeName, record) {
-  const { tx, store } = await tx(storeName, 'readwrite');
-  store.put(record);
-  return tx.complete;
-}
-
-export async function deleteRecord(storeName, key) {
-  const { tx, store } = await tx(storeName, 'readwrite');
-  store.delete(key);
-  return tx.complete;
-}
-
-export async function getAll(storeName) {
-  const { tx, store } = await tx(storeName);
-  return new Promise((resolve, reject) => {
-    const request = store.getAll();
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
+export const addRecord = (storeName, record) => run(storeName, 'readwrite', (s) => s.add(record));
+export const updateRecord = (storeName, record) => run(storeName, 'readwrite', (s) => s.put(record));
+export const deleteRecord = (storeName, key) => run(storeName, 'readwrite', (s) => s.delete(key));
+export const getRecord = (storeName, key) => run(storeName, 'readonly', (s) => s.get(key));
+export const getAll = (storeName) => run(storeName, 'readonly', (s) => s.getAll());
 
 // Specific domain helpers (example for foods)
 export const FoodStore = {
@@ -117,13 +112,8 @@ export const FoodStore = {
   getAll: () => getAll('foods'),
 };
 
-// Similar objects can be created for meals, symptoms, bowel_events, etc.
-
-/**
- * Utility to generate a UUID v4 – sufficient for local use.
- */
+/** Utility to generate a UUID v4 – sufficient for local use. */
 export function uuidv4() {
-  // Crypto‑secure random UUID
   return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
     (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)
   );
