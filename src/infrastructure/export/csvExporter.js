@@ -3,8 +3,9 @@
  *
  * Generatore CSV client-side (UTF-8 BOM, separatore ";" locale IT).
  * Le colonne riflettono i campi realmente scritti dall'app card-only:
- * pasti a occorrenze con FODMAP e zuccheri, check-in sintomi, Bristol.
- * I vecchi record con porzioni in grammi restano leggibili via fallback.
+ * pasti a occorrenze con FODMAP e zuccheri, check-in sintomi
+ * multidimensionali, Bristol. I vecchi record restano leggibili
+ * via fallback.
  */
 
 import { openDB } from '../storage/db.js';
@@ -120,7 +121,7 @@ export async function exportMealsCSV(periodDays = 0) {
   return lines.join('\r\n');
 }
 
-// -- Sintomi (check-in rapido) --
+// -- Sintomi (check-in multidimensionale) --
 
 export async function exportSymptomsCSV(periodDays = 0) {
   let symptoms = await getAllFromStore('symptoms');
@@ -128,13 +129,17 @@ export async function exportSymptomsCSV(periodDays = 0) {
   symptoms.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
 
   return toCSV(
-    ['Data e Ora', 'Tipo Check-in', 'Dolore (0-10)', 'Gonfiore (0-10)', 'Note'],
+    ['Data e Ora', 'Tipo Check-in', 'Dolore Addominale (0-10)', 'Gonfiore (0-10)',
+     'Dolore Pelvico (0-10)', 'Endo-belly', 'Dischezia', 'Note'],
     symptoms,
     (s) => [
       formatDate(s.timestamp),
       s.type || '',
       s.abdominalPainIntensity ?? '',
       s.bloatingIntensity ?? '',
+      s.pelvicPainIntensity ?? '',
+      s.endoBellyDistension == null ? '' : s.endoBellyDistension ? 'Si' : 'No',
+      s.dyschezia == null ? '' : s.dyschezia ? 'Si' : 'No',
       s.notes || '',
     ]
   );

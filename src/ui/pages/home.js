@@ -7,13 +7,13 @@
  * elimina l'ultima registrazione di quel tipo fatta oggi.
  *
  * Single source of truth: contatori settimanali e storico derivano
- * SEMPRE dai record del diario in IndexedDB (ricalcolati al caricamento);
- * localStorage conserva solo la preferenza pranzo/cena.
- * Le card vivono nel database ("Inserisci alimento"), divise in
- * Pranzo, Cena e Altro.
+ * SEMPRE dai record del diario in IndexedDB (ricalcolati al caricamento).
+ * Il check-in sintomi e' multidimensionale (dolore addominale, gonfiore,
+ * dolore pelvico, endo-belly, dischezia) e raccoglie i confondenti
+ * giornalieri usati dal motore di analisi.
  */
 
-import { addRecord, deleteRecord, uuidv4, getAll } from '../../infrastructure/storage/db.js';
+import { addRecord, deleteRecord, updateRecord, getRecord, uuidv4, getAll } from '../../infrastructure/storage/db.js';
 import { getProfile } from '../../infrastructure/storage/userProfile.js';
 import { getCards, migrateLegacyCards } from '../../domain/foods/cardService.js';
 import {
@@ -209,6 +209,20 @@ export async function render(rootElement) {
       </section>
   `).join('');
 
+  const CONFOUNDER_CHOICES = [
+    { id: 'stressLevel', label: '😰 Stress alto' },
+    { id: 'alcoholIntake', label: '🍷 Alcol' },
+    { id: 'travelOrRoutineChange', label: '✈️ Viaggio / cambio routine' },
+    { id: 'heavyMealConsumed', label: '🍽️ Pasto molto abbondante o grasso' },
+    { id: 'intercurrentIllness', label: '💊 Farmaci nuovi o malattia intercorrente' },
+  ];
+
+  const confounderCheckboxesHTML = CONFOUNDER_CHOICES.map((c) => `
+      <label class="inline-flex items-center gap-2 cursor-pointer bg-white border border-gray-200 rounded-lg px-2 py-1.5">
+        <input type="checkbox" name="conf-${c.id}" class="accent-amber-600 rounded">
+        <span>${c.label}</span>
+      </label>`).join('');
+
   rootElement.innerHTML = `
     <div class="home-container max-w-2xl mx-auto px-4 py-4 space-y-4 pb-24">
 
@@ -275,7 +289,7 @@ export async function render(rootElement) {
 
     <!-- Modal Sintomi Rapido -->
     <dialog id="symptom-modal" class="w-11/12 max-w-md rounded-2xl p-0 backdrop:bg-black/60 backdrop:backdrop-blur-sm shadow-2xl m-auto">
-      <div class="p-5 bg-white">
+      <div class="p-5 bg-white max-h-[85vh] overflow-y-auto">
         <div class="flex justify-between items-center mb-3 pb-2 border-b">
           <div>
             <h3 class="text-base font-bold text-gray-800">⚡ Check-in Sintomi</h3>
@@ -287,7 +301,7 @@ export async function render(rootElement) {
         <form id="form-symptom" class="space-y-4 text-xs">
           <div>
             <div class="flex justify-between font-semibold text-gray-700 mb-1">
-              <label for="input-pain">Dolore Addominale (0-10)</label>
+              <label for="input-pain">Dolore addominale / intestinale (0-10)</label>
               <span id="val-pain" class="text-emerald-600 font-bold">0</span>
             </div>
             <input type="range" id="input-pain" min="0" max="10" value="0" class="w-full accent-emerald-600">
@@ -295,10 +309,32 @@ export async function render(rootElement) {
 
           <div>
             <div class="flex justify-between font-semibold text-gray-700 mb-1">
-              <label for="input-bloat">Gonfiore (0-10)</label>
+              <label for="input-bloat">Gonfiore / distensione (0-10)</label>
               <span id="val-bloat" class="text-emerald-600 font-bold">0</span>
             </div>
             <input type="range" id="input-bloat" min="0" max="10" value="0" class="w-full accent-emerald-600">
+          </div>
+
+          <div>
+            <div class="flex justify-between font-semibold text-gray-700 mb-1">
+              <label for="input-pelvic">Dolore pelvico, non collegato alla pancia (0-10)</label>
+              <span id="val-pelvic" class="text-emerald-600 font-bold">0</span>
+            </div>
+            <input type="range" id="input-pelvic" min="0" max="10" value="0" class="w-full accent-rose-500">
+          </div>
+
+          <div>
+            <label class="block font-semibold text-gray-700 mb-1">Alvo e tensione</label>
+            <div class="grid grid-cols-1 gap-1.5 p-2 bg-gray-50 border border-gray-200 rounded-xl text-[11px]">
+              <label class="inline-flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" id="input-endobelly" class="accent-emerald-600 rounded">
+                <span>Pancia molto tesa / "endo-belly" visibile</span>
+              </label>
+              <label class="inline-flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" id="input-dyschezia" class="accent-emerald-600 rounded">
+                <span>Dolore o difficoltà durante l'evacuazione</span>
+              </label>
+            </div>
           </div>
 
           <div>
@@ -316,8 +352,16 @@ export async function render(rootElement) {
           </div>
 
           <div>
-            <label class="block font-semibold text-gray-700 mb-1">Note o Fattori Concomitanti</label>
-            <input type="text" id="input-notes" placeholder="Es. stress alto, cena fuori casa..." class="w-full p-2 border rounded-lg bg-gray-50">
+            <label class="block font-semibold text-gray-700 mb-1">Fattori del giorno che possono interferire</label>
+            <p class="text-[10px] text-gray-400 mb-1">Servono a non attribuire ai cibi sintomi dovuti ad altro.</p>
+            <div class="grid grid-cols-1 gap-1.5 p-2 bg-amber-50/60 border border-amber-100 rounded-xl text-[11px]">
+              ${confounderCheckboxesHTML}
+            </div>
+          </div>
+
+          <div>
+            <label class="block font-semibold text-gray-700 mb-1">Note libere</label>
+            <input type="text" id="input-notes" placeholder="Es. cena fuori casa, sonno scarso..." class="w-full p-2 border rounded-lg bg-gray-50">
           </div>
 
           <div class="pt-2 flex gap-2">
@@ -399,9 +443,7 @@ export async function render(rootElement) {
     let bar = "bg-emerald-500";
     let statusLabel;
     let ariaLabel;
-    // La barra di avanzamento esiste solo se c'e' un budget da riempire:
-    // su una card senza limite "piena al 100%" indurrebbe a credere
-    // a un completamento che non esiste.
+    // La barra di avanzamento esiste solo se c'e' un budget da riempire
     let statusBarHTML = '';
 
     if (!state.hasLimit) {
@@ -611,12 +653,13 @@ export async function render(rootElement) {
     renderAll();
   });
 
-  // -- Modal Sintomi --
+  // -- Modal Sintomi (multidimensionale + confondenti giornalieri) --
 
   const symptomModal = document.getElementById('symptom-modal');
   const formSymptom = document.getElementById('form-symptom');
   const painInput = document.getElementById('input-pain');
   const bloatInput = document.getElementById('input-bloat');
+  const pelvicInput = document.getElementById('input-pelvic');
 
   painInput?.addEventListener('input', () => {
     document.getElementById('val-pain').textContent = painInput.value;
@@ -624,12 +667,31 @@ export async function render(rootElement) {
   bloatInput?.addEventListener('input', () => {
     document.getElementById('val-bloat').textContent = bloatInput.value;
   });
+  pelvicInput?.addEventListener('input', () => {
+    document.getElementById('val-pelvic').textContent = pelvicInput.value;
+  });
 
   document.getElementById('btn-quick-symptom')?.addEventListener('click', () => symptomModal.showModal());
   document.getElementById('btn-close-symptom')?.addEventListener('click', () => symptomModal.close());
   symptomModal?.addEventListener('click', (e) => { if (e.target === symptomModal) symptomModal.close(); });
 
-  async function saveSymptom(pain, bloat, bristol, notes) {
+  function readConfoundersFromForm() {
+    return {
+      stressLevel: document.querySelector('[name="conf-stressLevel"]')?.checked ? 'HIGH' : 'NORMAL',
+      alcoholIntake: document.querySelector('[name="conf-alcoholIntake"]')?.checked || false,
+      travelOrRoutineChange: document.querySelector('[name="conf-travelOrRoutineChange"]')?.checked || false,
+      heavyMealConsumed: document.querySelector('[name="conf-heavyMealConsumed"]')?.checked || false,
+      intercurrentIllness: document.querySelector('[name="conf-intercurrentIllness"]')?.checked || false,
+    };
+  }
+
+  async function saveConfoundersForToday(flags) {
+    const today = getLocalISODate();
+    const existing = (await getRecord('confounders', today)) || { date: today };
+    await updateRecord('confounders', { ...existing, ...flags });
+  }
+
+  async function saveCheckin({ pain, bloat, pelvic, endoBelly, dyschezia, bristol, confounders, notes }) {
     const timestamp = new Date().toISOString();
     await addRecord('symptoms', {
       id: uuidv4(),
@@ -637,6 +699,9 @@ export async function render(rootElement) {
       type: 'CHECK_IN',
       abdominalPainIntensity: pain,
       bloatingIntensity: bloat,
+      pelvicPainIntensity: pelvic,
+      endoBellyDistension: !!endoBelly,
+      dyschezia: !!dyschezia,
       notes: notes || ''
     });
     if (bristol) {
@@ -647,30 +712,42 @@ export async function render(rootElement) {
         notes: ''
       });
     }
+    await saveConfoundersForToday(confounders);
   }
 
-  formSymptom?.addEventListener('submit', async (e) => {
+  async function handleCheckinSubmit(e) {
     e.preventDefault();
     try {
-      await saveSymptom(
-        Number(painInput.value),
-        Number(bloatInput.value),
-        document.getElementById('input-bristol').value,
-        document.getElementById('input-notes').value
-      );
+      await saveCheckin({
+        pain: Number(painInput.value),
+        bloat: Number(bloatInput.value),
+        pelvic: Number(pelvicInput.value),
+        endoBelly: document.getElementById('input-endobelly').checked,
+        dyschezia: document.getElementById('input-dyschezia').checked,
+        bristol: document.getElementById('input-bristol').value,
+        confounders: readConfoundersFromForm(),
+        notes: document.getElementById('input-notes').value,
+      });
       formSymptom.reset();
       document.getElementById('val-pain').textContent = '0';
       document.getElementById('val-bloat').textContent = '0';
+      document.getElementById('val-pelvic').textContent = '0';
       symptomModal.close();
     } catch (err) {
       console.warn('Errore salvataggio sintomo:', err);
       alert('Salvataggio non riuscito: riprova.');
     }
-  });
+  }
+
+  formSymptom?.addEventListener('submit', handleCheckinSubmit);
 
   document.getElementById('btn-no-symptoms')?.addEventListener('click', async () => {
     try {
-      await saveSymptom(0, 0, '', '');
+      await saveCheckin({
+        pain: 0, bloat: 0, pelvic: 0,
+        endoBelly: false, dyschezia: false,
+        bristol: '', confounders: readConfoundersFromForm(), notes: ''
+      });
       symptomModal.close();
     } catch (err) {
       console.warn('Errore salvataggio check-in:', err);
@@ -735,6 +812,7 @@ export async function render(rootElement) {
             type: 'CHECK_IN',
             abdominalPainIntensity: Math.floor(Math.random() * 4),
             bloatingIntensity: Math.floor(Math.random() * 5),
+            pelvicPainIntensity: Math.floor(Math.random() * 3),
             notes: 'demo'
           });
         }
