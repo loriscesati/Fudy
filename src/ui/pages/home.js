@@ -5,10 +5,12 @@
  * Le card sono l'unico metodo di inserimento dei consumi: un tap su +
  * registra UNA occorrenza dell'alimento in IndexedDB, un tap su -
  * elimina l'ultima registrazione di quel tipo fatta oggi.
- * Le card vivono nel database (leggibili e modificabili dalla pagina
- * "Inserisci alimento"), divise in tre sezioni: Pranzo, Cena, Altro.
- * Ogni card mostra un bollino consumato/limite con barra di avanzamento,
- * oppure il semplice contatore settimanale se non ha un budget.
+ *
+ * Single source of truth: contatori settimanali e storico derivano
+ * SEMPRE dai record del diario in IndexedDB (ricalcolati al caricamento);
+ * localStorage conserva solo la preferenza pranzo/cena.
+ * Le card vivono nel database ("Inserisci alimento"), divise in
+ * Pranzo, Cena e Altro.
  */
 
 import { addRecord, deleteRecord, uuidv4, getAll } from '../../infrastructure/storage/db.js';
@@ -31,6 +33,7 @@ const MEAL_TYPES = [
 
 const HISTORY_RETENTION_DAYS = 90;
 
+// Stato in memoria, derivato dal diario: mai persistito altrove
 let appState = {
   weekMondayId: "",
   consumedThisWeek: { pranzo: {}, cena: {}, altro: {} },
@@ -51,55 +54,74 @@ function getMondayString(d) {
   return getLocalISODate(new Date(date.setDate(diff)));
 }
 
-// -- Stato locale (cache dei contatori; il diario vero e' in IndexedDB) --
+// -- Preferenza leggera (unica cosa in localStorage) --
 
-function saveLocalState() {
-  localStorage.setItem('fodmap_state', JSON.stringify(appState));
+function loadPrefs() {
+  const saved = localStorage.getItem('fudy_prefs');
+  if (saved) {
+    try { appState.activeMeal = JSON.parse(saved).activeMeal || null; } catch (e) {}
+  }
+  if (!appState.activeMeal) appState.activeMeal = new Date().getHours() < 15 ? 'pranzo' : 'cena';
 }
 
-function loadLocalState() {
-  const saved = localStorage.getItem('fodmap_state');
-  if (saved) {
-    try { appState = { ...appState, ...JSON.parse(saved) }; } catch (e) {}
-  }
+function savePrefs() {
+  localStorage.setItem('fudy_prefs', JSON.stringify({ activeMeal: appState.activeMeal }));
+}
 
-  // Garantisce la presenza delle tre sezioni anche su stati salvati vecchi
-  appState.consumedThisWeek = {
-    pranzo: {},
-    cena: {},
-    altro: {},
-    ...(appState.consumedThisWeek || {})
-  };
+// -- Derivazione dello stato dal diario (IndexedDB = unica fonte) --
 
-  const currentMonday = getMondayString(new Date());
-  if (appState.weekMondayId !== currentMonday) {
-    appState.weekMondayId = currentMonday;
-    appState.consumedThisWeek = { pranzo: {}, cena: {}, altro: {} };
-  }
-
-  const today = getLocalISODate();
-  if (!appState.history[today]) appState.history[today] = { pranzo: [], cena: [], altro: [] };
-  if (!appState.activeMeal) appState.activeMeal = new Date().getHours() < 15 ? 'pranzo' : 'cena';
-
-  const cutoff = getLocalISODate(new Date(Date.now() - HISTORY_RETENTION_DAYS * 86400000));
-  Object.keys(appState.history).forEach(date => {
-    if (date < cutoff) delete appState.history[date];
-  });
-
-  saveLocalState();
+function emptyDay() {
+  return { pranzo: [], cena: [], altro: [] };
 }
 
 /**
- * Aggiorna i contatori locali dopo che IndexedDB ha confermato la scrittura.
- * delta = +1 (aggiunta) oppure -1 (rimozione). dateKey = data della registrazione.
+ * Ricalcola contatori settimanali e storico giornaliero partendo dai
+ * record del diario. Eseguire dopo chiusure/avvii e dopo operazioni
+ * che toccano giorni diversi da oggi.
  */
-function applyLocalDelta(section, foodId, delta, dateKey = getLocalISODate()) {
-  if (!appState.consumedThisWeek[section]) appState.consumedThisWeek[section] = {};
-  const current = appState.consumedThisWeek[section][foodId] || 0;
-  appState.consumedThisWeek[section][foodId] = Math.max(0, current + delta);
+async function rebuildStateFromDiary() {
+  const allMeals = (await getAll('meals')) || [];
+  const currentMonday = getMondayString(new Date());
+  appState.weekMondayId = currentMonday;
 
-  if (!appState.history[dateKey]) appState.history[dateKey] = { pranzo: [], cena: [], altro: [] };
-  if (!appState.history[dateKey][section]) appState.history[dateKey][section] = [];
+  const consumed = { pranzo: {}, cena: {}, altro: {} };
+  const history = {};
+  const cutoff = getLocalISODate(new Date(Date.now() - HISTORY_RETENTION_DAYS * 86400000));
+
+  for (const m of allMeals) {
+    if (m.source !== 'QUICK_TAP' || !m.timestamp) continue;
+    const d = new Date(m.timestamp);
+    const dateKey = getLocalISODate(d);
+    if (dateKey < cutoff) continue;
+
+    const section = MEAL_TYPE_SECTION[m.mealType];
+    if (!section) continue;
+    const inThisWeek = getMondayString(d) === currentMonday;
+
+    if (!history[dateKey]) history[dateKey] = emptyDay();
+    for (const item of (m.items || [])) {
+      history[dateKey][section].push(item.foodId);
+      if (inThisWeek) {
+        consumed[section][item.foodId] = (consumed[section][item.foodId] || 0) + (item.occurrences || 1);
+      }
+    }
+  }
+
+  appState.consumedThisWeek = consumed;
+  appState.history = history;
+}
+
+/**
+ * Delta in memoria dopo una scrittura confermata dal database:
+ * evita di rileggere tutto il diario a ogni tap.
+ */
+function applyLocalDelta(section, foodId, delta, dateKey = getLocalISODate(), touchesCurrentWeek = true) {
+  if (touchesCurrentWeek) {
+    const current = appState.consumedThisWeek[section][foodId] || 0;
+    appState.consumedThisWeek[section][foodId] = Math.max(0, current + delta);
+  }
+
+  if (!appState.history[dateKey]) appState.history[dateKey] = emptyDay();
   if (delta > 0) {
     appState.history[dateKey][section].push(foodId);
   } else {
@@ -107,7 +129,6 @@ function applyLocalDelta(section, foodId, delta, dateKey = getLocalISODate()) {
     const index = arr.lastIndexOf(foodId);
     if (index > -1) arr.splice(index, 1);
   }
-  saveLocalState();
 }
 
 // -- Record rapidi: scrittura e cancellazione speculare in IndexedDB --
@@ -117,7 +138,6 @@ function buildQuickRecord(section, card, when = new Date()) {
     id: uuidv4(),
     timestamp: when.toISOString(),
     mealType: SECTION_MEAL_TYPE[section],
-    isEatingOut: false,
     notes: '',
     source: 'QUICK_TAP',
     items: [{
@@ -130,10 +150,7 @@ function buildQuickRecord(section, card, when = new Date()) {
   };
 }
 
-/**
- * Trova l'ultima registrazione di oggi di quella card per quella sezione.
- * Serve a rendere il tasto - l'inverso esatto del tasto +.
- */
+/** Trova l'ultima registrazione di oggi di quella card per quella sezione. */
 async function findLatestQuickRecord(section, foodId) {
   const today = getLocalISODate();
   const mealType = SECTION_MEAL_TYPE[section];
@@ -145,10 +162,7 @@ async function findLatestQuickRecord(section, foodId) {
     .sort((a, b) => b.timestamp.localeCompare(a.timestamp))[0] || null;
 }
 
-/**
- * Elimina un record pasto e, se appartiene alla settimana corrente e deriva
- * da un tap rapido, aggiorna anche i contatori locali della card.
- */
+/** Elimina un record pasto e aggiorna contatori e storico in memoria. */
 async function deleteMealRecord(record, cardsById) {
   await deleteRecord('meals', record.id);
   if (record.source !== 'QUICK_TAP' || !record.timestamp) return;
@@ -157,16 +171,14 @@ async function deleteMealRecord(record, cardsById) {
   const item = (record.items || [])[0];
   if (!section || !item || !cardsById[item.foodId]) return;
 
-  const recordWeek = getMondayString(new Date(record.timestamp));
-  if (recordWeek !== appState.weekMondayId) return;
-
-  applyLocalDelta(section, item.foodId, -1, getLocalISODate(new Date(record.timestamp)));
+  const touchesCurrentWeek = getMondayString(new Date(record.timestamp)) === appState.weekMondayId;
+  applyLocalDelta(section, item.foodId, -1, getLocalISODate(new Date(record.timestamp)), touchesCurrentWeek);
 }
 
 // -- Pagina --
 
 export async function render(rootElement) {
-  loadLocalState();
+  loadPrefs();
 
   const profile = await getProfile();
   try {
@@ -176,6 +188,12 @@ export async function render(rootElement) {
   }
   const cards = await getCards();
   const cardsById = Object.fromEntries(cards.map((c) => [c.id, c]));
+
+  try {
+    await rebuildStateFromDiary();
+  } catch (err) {
+    console.warn('Lettura diario non riuscita:', err);
+  }
 
   const phaseNames = {
     PREPARATION: 'Preparazione / Baseline',
@@ -594,12 +612,12 @@ export async function render(rootElement) {
 
   document.getElementById('toggle-pranzo')?.addEventListener('click', () => {
     appState.activeMeal = 'pranzo';
-    saveLocalState();
+    savePrefs();
     renderAll();
   });
   document.getElementById('toggle-cena')?.addEventListener('click', () => {
     appState.activeMeal = 'cena';
-    saveLocalState();
+    savePrefs();
     renderAll();
   });
 
@@ -715,7 +733,7 @@ export async function render(rootElement) {
             const when = new Date(day);
             when.setHours(entry.key === 'pranzo' ? 12 : entry.key === 'cena' ? 19 : 16, 30, 0, 0);
             await addRecord('meals', buildQuickRecord(entry.key, card, when));
-            if (getMondayString(when) === appState.weekMondayId) applyLocalDelta(entry.key, card.id, +1, dateKey);
+            applyLocalDelta(entry.key, card.id, +1, dateKey, getMondayString(when) === appState.weekMondayId);
           }
         }
 
