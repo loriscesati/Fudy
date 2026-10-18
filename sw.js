@@ -1,6 +1,6 @@
 // Service Worker per FODMAP Path PWA
 // Incrementa CACHE_NAME ad ogni modifica per forzare il refresh
-const CACHE_NAME = 'fodmap-path-v9';
+const CACHE_NAME = 'fodmap-path-v10';
 
 const FILES_TO_CACHE = [
   './',
@@ -14,6 +14,8 @@ const FILES_TO_CACHE = [
   './src/infrastructure/export/pdfExporter.js',
   './src/domain/insights/associationEngine.js',
   './src/domain/foods/foodService.js',
+  './src/domain/foods/cardModel.js',
+  './src/domain/foods/cardService.js',
   './src/domain/challenge/challengeService.js',
   './src/ui/router.js',
   './src/ui/onboarding.js',
@@ -58,7 +60,7 @@ self.addEventListener('fetch', (event) => {
   event.respondWith(
     fetch(event.request)
       .then((networkResponse) => {
-        // Se la risposta è valida, aggiorna la cache asincronamente
+        // Se la risposta e' valida, aggiorna la cache asincronamente
         if (networkResponse && networkResponse.status === 200) {
           const responseToCache = networkResponse.clone();
           caches.open(CACHE_NAME).then((cache) => {
