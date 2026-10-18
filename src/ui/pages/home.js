@@ -74,11 +74,6 @@ function emptyDay() {
   return { pranzo: [], cena: [], altro: [] };
 }
 
-/**
- * Ricalcola contatori settimanali e storico giornaliero partendo dai
- * record del diario. Eseguire dopo chiusure/avvii e dopo operazioni
- * che toccano giorni diversi da oggi.
- */
 async function rebuildStateFromDiary() {
   const allMeals = (await getAll('meals')) || [];
   const currentMonday = getMondayString(new Date());
@@ -111,10 +106,6 @@ async function rebuildStateFromDiary() {
   appState.history = history;
 }
 
-/**
- * Delta in memoria dopo una scrittura confermata dal database:
- * evita di rileggere tutto il diario a ogni tap.
- */
 function applyLocalDelta(section, foodId, delta, dateKey = getLocalISODate(), touchesCurrentWeek = true) {
   if (touchesCurrentWeek) {
     const current = appState.consumedThisWeek[section][foodId] || 0;
@@ -130,8 +121,6 @@ function applyLocalDelta(section, foodId, delta, dateKey = getLocalISODate(), to
     if (index > -1) arr.splice(index, 1);
   }
 }
-
-// -- Record rapidi: scrittura e cancellazione speculare in IndexedDB --
 
 function buildQuickRecord(section, card, when = new Date()) {
   return {
@@ -150,7 +139,6 @@ function buildQuickRecord(section, card, when = new Date()) {
   };
 }
 
-/** Trova l'ultima registrazione di oggi di quella card per quella sezione. */
 async function findLatestQuickRecord(section, foodId) {
   const today = getLocalISODate();
   const mealType = SECTION_MEAL_TYPE[section];
@@ -162,7 +150,6 @@ async function findLatestQuickRecord(section, foodId) {
     .sort((a, b) => b.timestamp.localeCompare(a.timestamp))[0] || null;
 }
 
-/** Elimina un record pasto e aggiorna contatori e storico in memoria. */
 async function deleteMealRecord(record, cardsById) {
   await deleteRecord('meals', record.id);
   if (record.source !== 'QUICK_TAP' || !record.timestamp) return;
@@ -411,17 +398,18 @@ export async function render(rootElement) {
     let badge = "bg-emerald-100 text-emerald-700";
     let bar = "bg-emerald-500";
     let statusLabel;
-    let progress = 0;
     let ariaLabel;
+    // La barra di avanzamento esiste solo se c'e' un budget da riempire:
+    // su una card senza limite "piena al 100%" indurrebbe a credere
+    // a un completamento che non esiste.
+    let statusBarHTML = '';
 
     if (!state.hasLimit) {
       statusLabel = `${state.consumed}×`;
-      progress = state.consumed > 0 ? 100 : 0;
-      bar = state.consumed > 0 ? "bg-emerald-400" : "bg-emerald-500";
       ariaLabel = `${card.name}: consumato ${state.consumed} volta/e questa settimana, nessun limite impostato`;
     } else {
       const { limit, remaining } = state;
-      progress = limit > 0 ? Math.min((state.consumed / limit) * 100, 100) : 100;
+      const progress = limit > 0 ? Math.min((state.consumed / limit) * 100, 100) : 100;
       statusLabel = `${state.consumed}/${limit}`;
       if (remaining === 0) {
         bg = "bg-gray-50 border-gray-200 opacity-80";
@@ -438,6 +426,10 @@ export async function render(rootElement) {
       ariaLabel =
         `${card.name}: consumati ${state.consumed} su ${limit}${state.isShared ? ' (budget condiviso di gruppo)' : ''}; ` +
         `${remaining >= 0 ? `ne rimangono ${remaining}` : `sforato di ${Math.abs(remaining)}`}`;
+      statusBarHTML = `
+        <div class="h-1 rounded-full bg-black/10 overflow-hidden mb-1.5" aria-hidden="true">
+          <div class="h-full ${bar} transition-all" style="width: ${progress}%"></div>
+        </div>`;
     }
 
     return `
@@ -449,9 +441,7 @@ export async function render(rootElement) {
             ${statusLabel}
           </span>
         </div>
-        <div class="h-1 rounded-full bg-black/10 overflow-hidden mb-1.5" aria-hidden="true">
-          <div class="h-full ${bar} transition-all" style="width: ${progress}%"></div>
-        </div>
+        ${statusBarHTML}
         <div class="font-semibold text-xs mb-1.5 leading-tight truncate ${text}">${card.name}</div>
         <div class="flex gap-1.5">
           <button data-action="remove" data-section="${section}" data-food-id="${card.id}" aria-label="Rimuovi un ${card.name}"

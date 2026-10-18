@@ -4,7 +4,8 @@
  * CRUD delle card alimentari sullo store IndexedDB 'foods'
  * (campo isCard: true le distingue da eventuali record legacy).
  * Include la migrazione una tantum delle card che prima erano
- * scritte nel codice della home.
+ * scritte nel codice della home, con riparazione idempotente
+ * delle classificazioni corrette dopo la prima versione.
  */
 
 import { uuidv4, getRecord, updateRecord, deleteRecord, getAll } from '../../infrastructure/storage/db.js';
@@ -14,15 +15,16 @@ const MIGRATION_FLAG = 'fudy_cards_migration_v1';
 
 /**
  * Seed delle card preesistenti: stessi ID della vecchia costante
- * BUDGET, cosi' i contatori e lo storico gia' salvati in locale
- * continuano a corrispondere.
+ * BUDGET, cosi' i consumi gia' registrati nel diario continuano
+ * a corrispondere. La pasta tradizionale non contiene glucosio
+ * libero: contiene amido, quindi nessuno zucchero rilevante.
  */
 const LEGACY_CARDS = [
   { id: 'carne_bianca', name: 'Carne Bianca', emoji: '🍗', mealSection: 'LUNCH', weeklyLimit: 3, primaryFodmapGroup: ['LOW_FODMAP_SAFE'], sugars: ['NONE'] },
   { id: 'uovo_pranzo', name: 'Uova', emoji: '🥚', mealSection: 'LUNCH', weeklyLimit: 2, primaryFodmapGroup: ['LOW_FODMAP_SAFE'], sugars: ['NONE'] },
   { id: 'mozzarella', name: 'Mozzarella', emoji: '🧀', mealSection: 'LUNCH', weeklyLimit: 1, primaryFodmapGroup: ['LACTOSE'], sugars: ['LACTOSE'] },
   { id: 'gamberi_calamari', name: 'Gamberi/Calamari', emoji: '🦐', mealSection: 'LUNCH', weeklyLimit: 1, primaryFodmapGroup: ['LOW_FODMAP_SAFE'], sugars: ['NONE'] },
-  { id: 'pasta_frumento', name: 'Pasta Tradizionale', emoji: '🍝', mealSection: 'LUNCH', weeklyLimit: 2, primaryFodmapGroup: ['FRUCTANS_GRAIN'], sugars: ['GLUCOSE'] },
+  { id: 'pasta_frumento', name: 'Pasta Tradizionale', emoji: '🍝', mealSection: 'LUNCH', weeklyLimit: 2, primaryFodmapGroup: ['FRUCTANS_GRAIN'], sugars: ['NONE'] },
   { id: 'legumi_misti', name: 'Legumi', emoji: '🫘', mealSection: 'LUNCH', weeklyLimit: 1, primaryFodmapGroup: ['GOS'], sugars: ['NONE'] },
   { id: 'pesce_magro', name: 'Pesce Magro', emoji: '🐟', mealSection: 'DINNER', weeklyLimit: 2, primaryFodmapGroup: ['LOW_FODMAP_SAFE'], sugars: ['NONE'] },
   { id: 'pesce_azzurro', name: 'Pesce Azzurro', emoji: '🎣', mealSection: 'DINNER', weeklyLimit: 1, primaryFodmapGroup: ['LOW_FODMAP_SAFE'], sugars: ['NONE'] },
@@ -77,23 +79,38 @@ export async function deleteCard(id) {
 }
 
 /**
- * Migrazione idempotente: la prima volta inserisce in IndexedDB le
- * card che vivevano nella costante BUDGET. Non sovrascrive card con
- * ID gia' esistenti, cosi' le modifiche dell'utente restano intatte.
+ * Riparazione idempotente della prima versione del seed: chi ha
+ * gia' migrato aveva la pasta tradizionale marcata "glucosio",
+ * incoerente con la composizione reale (amido). Corregge solo se
+ * la classificazione e' esattamente quella errata: modifiche
+ * manuali dell'utente non vengono toccate.
+ */
+async function repairSeedClassifications() {
+  const pasta = await getRecord('foods', 'pasta_frumento');
+  if (!pasta || !pasta.isCard) return;
+  const sugars = pasta.sugars || [];
+  if (sugars.length === 1 && sugars[0] === 'GLUCOSE') {
+    pasta.sugars = ['NONE'];
+    pasta.updatedAt = new Date().toISOString();
+    await updateRecord('foods', pasta);
+  }
+}
+
+/**
+ * Migrazione: la prima volta inserisce in IndexedDB le card che
+ * vivevano nella costante BUDGET. Non sovrascrive card con ID gia'
+ * esistenti; la riparazione dei dati seed e' comunque sempre eseguita.
  */
 export async function migrateLegacyCards() {
-  if (localStorage.getItem(MIGRATION_FLAG) === 'done') {
-    return { migrated: 0, skipped: true };
+  if (localStorage.getItem(MIGRATION_FLAG) !== 'done') {
+    let migrated = 0;
+    for (const legacy of LEGACY_CARDS) {
+      const existing = await getRecord('foods', legacy.id);
+      if (existing) continue;
+      await saveCard(legacy);
+      migrated++;
+    }
+    localStorage.setItem(MIGRATION_FLAG, 'done');
   }
-
-  let migrated = 0;
-  for (const legacy of LEGACY_CARDS) {
-    const existing = await getRecord('foods', legacy.id);
-    if (existing) continue;
-    await saveCard(legacy);
-    migrated++;
-  }
-
-  localStorage.setItem(MIGRATION_FLAG, 'done');
-  return { migrated, skipped: false };
+  await repairSeedClassifications();
 }
