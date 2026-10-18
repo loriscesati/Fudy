@@ -2,55 +2,38 @@
  * src/ui/pages/home.js
  *
  * Home di Fudy: diario rapido a card.
- * Un tap su + registra UNA occorrenza dell'alimento in IndexedDB;
- * un tap su - elimina l'ultima registrazione di quell'alimento di oggi.
- * Ogni card mostra un bollino consumato/limite con barra di avanzamento.
+ * Le card sono l'unico metodo di inserimento dei consumi: un tap su +
+ * registra UNA occorrenza dell'alimento in IndexedDB, un tap su -
+ * elimina l'ultima registrazione di quel tipo fatta oggi.
+ * Le card vivono nel database (leggibili e modificabili dalla pagina
+ * "Inserisci alimento"), divise in tre sezioni: Pranzo, Cena, Altro.
+ * Ogni card mostra un bollino consumato/limite con barra di avanzamento,
+ * oppure il semplice contatore settimanale se non ha un budget.
  */
 
 import { addRecord, deleteRecord, uuidv4, getAll } from '../../infrastructure/storage/db.js';
 import { getProfile } from '../../infrastructure/storage/userProfile.js';
+import { getCards, migrateLegacyCards } from '../../domain/foods/cardService.js';
+import {
+  CARD_SECTIONS,
+  SECTION_KEYS,
+  SECTION_MEAL_TYPE,
+  MEAL_TYPE_SECTION,
+  getCardBudgetState,
+} from '../../domain/foods/cardModel.js';
 
 const MEAL_TYPES = [
   { id: 'BREAKFAST', label: 'Colazione', icon: '☕' },
   { id: 'LUNCH', label: 'Pranzo', icon: '☀️' },
-  { id: 'SNACK', label: 'Spuntino', icon: '🍎' },
+  { id: 'SNACK', label: 'Spuntino / Altro', icon: '🧺' },
   { id: 'DINNER', label: 'Cena', icon: '🌙' },
 ];
-
-const MEAL_KEY_TO_TYPE = { pranzo: 'LUNCH', cena: 'DINNER' };
-const MEAL_TYPE_TO_KEY = { LUNCH: 'pranzo', DINNER: 'cena' };
-
-const BUDGET = {
-  pranzo: {
-    carne_bianca: { label: "Carne Bianca", emoji: "🍗", limit: 3, fodmap: ['LOW_FODMAP_SAFE'] },
-    uovo_pranzo: { label: "Uova", emoji: "🥚", limit: 2, fodmap: ['LOW_FODMAP_SAFE'] },
-    mozzarella: { label: "Mozzarella", emoji: "🧀", limit: 1, fodmap: ['LACTOSE'] },
-    gamberi_calamari: { label: "Gamberi/Cal.", emoji: "🦐", limit: 1, fodmap: ['LOW_FODMAP_SAFE'] },
-    pasta_frumento: { label: "Pasta Tradiz.", emoji: "🍝", limit: 2, fodmap: ['FRUCTANS_GRAIN'] },
-    legumi_misti: { label: "Legumi", emoji: "🫘", limit: 1, fodmap: ['GOS'] }
-  },
-  cena: {
-    pesce_magro: { label: "Pesce Magro", emoji: "🐟", limit: 2, fodmap: ['LOW_FODMAP_SAFE'] },
-    pesce_azzurro: { label: "Pesce Azzurro", emoji: "🎣", limit: 1, fodmap: ['LOW_FODMAP_SAFE'] },
-    salmone_fresco: { label: "Salmone Fresco", emoji: "🍣", limit: 2, fodmap: ['LOW_FODMAP_SAFE'] },
-    salmone_affumicato: { label: "Salm. Affum.", emoji: "🥓", limit: 1, fodmap: ['LOW_FODMAP_SAFE'], sharedGroup: 'salmone' },
-    carne_rossa: { label: "Carne Rossa", emoji: "🥩", limit: 1, fodmap: ['LOW_FODMAP_SAFE'] },
-    uovo_cena: { label: "Uova", emoji: "🥚", limit: 1, fodmap: ['LOW_FODMAP_SAFE'] },
-    mela_frutta: { label: "Mela / Pera", emoji: "🍎", limit: 1, fodmap: ['EXCESS_FRUCTOSE', 'SORBITOL'] },
-    funghi_verdure: { label: "Funghi / Cavolf.", emoji: "🍄", limit: 1, fodmap: ['MANNITOL'] }
-  }
-};
-
-// Il salmone fresco condivide il tetto settimanale (2) con quello affumicato.
-const SHARED_GROUPS = {
-  salmone: { foods: ['salmone_fresco', 'salmone_affumicato'], limit: 2, meal: 'cena' }
-};
 
 const HISTORY_RETENTION_DAYS = 90;
 
 let appState = {
   weekMondayId: "",
-  consumedThisWeek: { pranzo: {}, cena: {} },
+  consumedThisWeek: { pranzo: {}, cena: {}, altro: {} },
   history: {},
   activeMeal: null
 };
@@ -68,7 +51,7 @@ function getMondayString(d) {
   return getLocalISODate(new Date(date.setDate(diff)));
 }
 
-// -- Stato locale (cache dei contatori; il diario vero è in IndexedDB) --
+// -- Stato locale (cache dei contatori; il diario vero e' in IndexedDB) --
 
 function saveLocalState() {
   localStorage.setItem('fodmap_state', JSON.stringify(appState));
@@ -80,14 +63,22 @@ function loadLocalState() {
     try { appState = { ...appState, ...JSON.parse(saved) }; } catch (e) {}
   }
 
+  // Garantisce la presenza delle tre sezioni anche su stati salvati vecchi
+  appState.consumedThisWeek = {
+    pranzo: {},
+    cena: {},
+    altro: {},
+    ...(appState.consumedThisWeek || {})
+  };
+
   const currentMonday = getMondayString(new Date());
   if (appState.weekMondayId !== currentMonday) {
     appState.weekMondayId = currentMonday;
-    appState.consumedThisWeek = { pranzo: {}, cena: {} };
+    appState.consumedThisWeek = { pranzo: {}, cena: {}, altro: {} };
   }
 
   const today = getLocalISODate();
-  if (!appState.history[today]) appState.history[today] = { pranzo: [], cena: [] };
+  if (!appState.history[today]) appState.history[today] = { pranzo: [], cena: [], altro: [] };
   if (!appState.activeMeal) appState.activeMeal = new Date().getHours() < 15 ? 'pranzo' : 'cena';
 
   const cutoff = getLocalISODate(new Date(Date.now() - HISTORY_RETENTION_DAYS * 86400000));
@@ -102,74 +93,50 @@ function loadLocalState() {
  * Aggiorna i contatori locali dopo che IndexedDB ha confermato la scrittura.
  * delta = +1 (aggiunta) oppure -1 (rimozione). dateKey = data della registrazione.
  */
-function applyLocalDelta(meal, foodId, delta, dateKey = getLocalISODate()) {
-  if (!appState.consumedThisWeek[meal]) appState.consumedThisWeek[meal] = {};
-  const current = appState.consumedThisWeek[meal][foodId] || 0;
-  appState.consumedThisWeek[meal][foodId] = Math.max(0, current + delta);
+function applyLocalDelta(section, foodId, delta, dateKey = getLocalISODate()) {
+  if (!appState.consumedThisWeek[section]) appState.consumedThisWeek[section] = {};
+  const current = appState.consumedThisWeek[section][foodId] || 0;
+  appState.consumedThisWeek[section][foodId] = Math.max(0, current + delta);
 
-  if (!appState.history[dateKey]) appState.history[dateKey] = { pranzo: [], cena: [] };
+  if (!appState.history[dateKey]) appState.history[dateKey] = { pranzo: [], cena: [], altro: [] };
+  if (!appState.history[dateKey][section]) appState.history[dateKey][section] = [];
   if (delta > 0) {
-    appState.history[dateKey][meal].push(foodId);
+    appState.history[dateKey][section].push(foodId);
   } else {
-    const arr = appState.history[dateKey][meal];
+    const arr = appState.history[dateKey][section];
     const index = arr.lastIndexOf(foodId);
     if (index > -1) arr.splice(index, 1);
   }
   saveLocalState();
 }
 
-// -- Budget: unico punto di verità per bollino, rimasti e suggerimenti --
-
-/**
- * Restituisce { consumed, limit, remaining, isShared } per la card.
- * consumed/limit alimentano il bollino; remaining i colori e i suggerimenti.
- */
-function getBudgetState(meal, foodId, config) {
-  const counts = appState.consumedThisWeek[meal] || {};
-  const ownConsumed = counts[foodId] || 0;
-  const limit = Math.max(0, Number(config.limit) || 0);
-
-  const group = config.sharedGroup ? SHARED_GROUPS[config.sharedGroup] : null;
-  if (group) {
-    const groupTotal = group.foods.reduce((sum, id) => sum + (counts[id] || 0), 0);
-    return {
-      consumed: groupTotal,
-      limit: group.limit,
-      remaining: Math.min(limit - ownConsumed, group.limit - groupTotal),
-      isShared: true
-    };
-  }
-
-  return { consumed: ownConsumed, limit, remaining: limit - ownConsumed, isShared: false };
-}
-
 // -- Record rapidi: scrittura e cancellazione speculare in IndexedDB --
 
-function buildQuickRecord(meal, foodId, when = new Date()) {
-  const config = BUDGET[meal][foodId];
+function buildQuickRecord(section, card, when = new Date()) {
   return {
     id: uuidv4(),
     timestamp: when.toISOString(),
-    mealType: MEAL_KEY_TO_TYPE[meal],
+    mealType: SECTION_MEAL_TYPE[section],
     isEatingOut: false,
     notes: '',
     source: 'QUICK_TAP',
     items: [{
-      foodId,
-      foodName: config.label,
-      fodmapGroupsSnapshot: config.fodmap,
+      foodId: card.id,
+      foodName: card.name,
+      fodmapGroupsSnapshot: card.primaryFodmapGroup || ['LOW_FODMAP_SAFE'],
+      sugarsSnapshot: card.sugars || ['NONE'],
       occurrences: 1
     }]
   };
 }
 
 /**
- * Trova l'ultima registrazione di oggi di quel foodId per quel pasto.
+ * Trova l'ultima registrazione di oggi di quella card per quella sezione.
  * Serve a rendere il tasto - l'inverso esatto del tasto +.
  */
-async function findLatestQuickRecord(meal, foodId) {
+async function findLatestQuickRecord(section, foodId) {
   const today = getLocalISODate();
-  const mealType = MEAL_KEY_TO_TYPE[meal];
+  const mealType = SECTION_MEAL_TYPE[section];
   const allMeals = await getAll('meals');
   return (allMeals || [])
     .filter(m => m.timestamp && m.timestamp.startsWith(today) && m.mealType === mealType
@@ -182,25 +149,33 @@ async function findLatestQuickRecord(meal, foodId) {
  * Elimina un record pasto e, se appartiene alla settimana corrente e deriva
  * da un tap rapido, aggiorna anche i contatori locali della card.
  */
-async function deleteMealRecord(record) {
+async function deleteMealRecord(record, cardsById) {
   await deleteRecord('meals', record.id);
   if (record.source !== 'QUICK_TAP' || !record.timestamp) return;
 
-  const meal = MEAL_TYPE_TO_KEY[record.mealType];
+  const section = MEAL_TYPE_SECTION[record.mealType];
   const item = (record.items || [])[0];
-  if (!meal || !item || !BUDGET[meal]?.[item.foodId]) return;
+  if (!section || !item || !cardsById[item.foodId]) return;
 
   const recordWeek = getMondayString(new Date(record.timestamp));
   if (recordWeek !== appState.weekMondayId) return;
 
-  applyLocalDelta(meal, item.foodId, -1, getLocalISODate(new Date(record.timestamp)));
+  applyLocalDelta(section, item.foodId, -1, getLocalISODate(new Date(record.timestamp)));
 }
 
 // -- Pagina --
 
 export async function render(rootElement) {
   loadLocalState();
+
   const profile = await getProfile();
+  try {
+    await migrateLegacyCards();
+  } catch (err) {
+    console.warn('Migrazione card legacy non riuscita:', err);
+  }
+  const cards = await getCards();
+  const cardsById = Object.fromEntries(cards.map((c) => [c.id, c]));
 
   const phaseNames = {
     PREPARATION: 'Preparazione / Baseline',
@@ -209,6 +184,25 @@ export async function render(rootElement) {
     PERSONALIZATION: 'Fase 3: Personalizzazione'
   };
   const phaseLabel = phaseNames[profile.phase] || 'Fase: Inizio Percorso';
+
+  const sectionTitles = {
+    pranzo: '☀️ Tap Rapido Pranzo',
+    cena: '🌙 Tap Rapido Cena',
+    altro: '🧺 Tap Rapido Altro'
+  };
+
+  const sectionsHTML = CARD_SECTIONS.map((section) => `
+      <section>
+        <div class="flex justify-between items-center mb-2">
+          <h3 class="text-sm font-bold text-gray-800 flex items-center gap-1.5">${sectionTitles[section.key]}</h3>
+          <span class="text-[11px] text-gray-400">+ aggiunge, − toglie l'ultimo</span>
+        </div>
+        <div id="${section.key}-grid" class="grid grid-cols-2 sm:grid-cols-3 gap-2"></div>
+        <a href="#alimenti" class="block mt-2 text-center text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-dashed border-emerald-300 rounded-xl py-2 hover:bg-emerald-100 transition-colors">
+          ＋ Gestisci o crea alimenti (sezione ${section.label})
+        </a>
+      </section>
+  `).join('');
 
   rootElement.innerHTML = `
     <div class="home-container max-w-2xl mx-auto px-4 py-4 space-y-4 pb-24">
@@ -263,21 +257,7 @@ export async function render(rootElement) {
         <div id="history-box" class="space-y-1 text-xs text-gray-600 pt-2 border-t border-emerald-100"></div>
       </section>
 
-      <section>
-        <div class="flex justify-between items-center mb-2">
-          <h3 class="text-sm font-bold text-gray-800 flex items-center gap-1.5">☀️ Tap Rapido Pranzo</h3>
-          <span class="text-[11px] text-gray-400">+ aggiunge, − toglie l'ultimo</span>
-        </div>
-        <div id="pranzo-grid" class="grid grid-cols-2 sm:grid-cols-3 gap-2"></div>
-      </section>
-
-      <section>
-        <div class="flex justify-between items-center mb-2">
-          <h3 class="text-sm font-bold text-gray-800 flex items-center gap-1.5">🌙 Tap Rapido Cena</h3>
-          <span class="text-[11px] text-gray-400">+ aggiunge, − toglie l'ultimo</span>
-        </div>
-        <div id="cena-grid" class="grid grid-cols-2 sm:grid-cols-3 gap-2"></div>
-      </section>
+      ${sectionsHTML}
 
       <div class="pt-4 border-t border-gray-200 flex flex-wrap gap-2 justify-between items-center text-xs text-gray-500">
         <span>Dati memorizzati 100% in locale nel browser.</span>
@@ -365,6 +345,10 @@ export async function render(rootElement) {
 
   // -- Rendering componenti --
 
+  function cardsBySection(sectionKey) {
+    return cards.filter((c) => SECTION_KEYS[c.mealSection] === sectionKey);
+  }
+
   function renderAll() {
     renderGrids();
     renderMealToggle();
@@ -383,53 +367,65 @@ export async function render(rootElement) {
   }
 
   function renderGrids() {
-    const pGrid = document.getElementById('pranzo-grid');
-    const cGrid = document.getElementById('cena-grid');
-    if (!pGrid || !cGrid) return;
-
-    pGrid.innerHTML = Object.entries(BUDGET.pranzo).map(([id, config]) => createCardHTML('pranzo', id, config)).join('');
-    cGrid.innerHTML = Object.entries(BUDGET.cena).map(([id, config]) => createCardHTML('cena', id, config)).join('');
+    for (const section of CARD_SECTIONS) {
+      const grid = document.getElementById(`${section.key}-grid`);
+      if (!grid) continue;
+      const sectionCards = cardsBySection(section.key);
+      grid.innerHTML = sectionCards.length > 0
+        ? sectionCards.map((card) => createCardHTML(section.key, card, sectionCards)).join('')
+        : `<p class="col-span-full text-[11px] text-gray-400 italic py-2">Nessun alimento in questa sezione. Crealo dalla pagina "Inserisci alimento".</p>`;
+    }
 
     rootElement.querySelectorAll('[data-action="add"]').forEach(btn => {
-      btn.onclick = () => handleAddFood(btn.dataset.meal, btn.dataset.foodId);
+      btn.onclick = () => handleAddFood(btn.dataset.section, btn.dataset.foodId);
     });
     rootElement.querySelectorAll('[data-action="remove"]').forEach(btn => {
-      btn.onclick = () => handleRemoveFood(btn.dataset.meal, btn.dataset.foodId);
+      btn.onclick = () => handleRemoveFood(btn.dataset.section, btn.dataset.foodId);
     });
   }
 
-  function createCardHTML(meal, foodId, config) {
-    const state = getBudgetState(meal, foodId, config);
-    const { consumed, limit, remaining, isShared } = state;
-    const progress = limit > 0 ? Math.min((consumed / limit) * 100, 100) : 100;
+  function createCardHTML(section, card, sectionCards) {
+    const counts = appState.consumedThisWeek[section] || {};
+    const state = getCardBudgetState(card, counts, sectionCards);
 
     let bg = "bg-white border-gray-200";
     let text = "text-gray-800";
     let badge = "bg-emerald-100 text-emerald-700";
     let bar = "bg-emerald-500";
-    let statusLabel = `${consumed}/${limit}`;
+    let statusLabel;
+    let progress = 0;
+    let ariaLabel;
 
-    if (remaining === 0) {
-      bg = "bg-gray-50 border-gray-200 opacity-80";
-      badge = "bg-gray-200 text-gray-600";
-      bar = "bg-gray-400";
-      statusLabel = `${consumed}/${limit} ✓`;
-    } else if (remaining < 0) {
-      bg = "bg-red-50 border-red-300";
-      text = "text-red-700";
-      badge = "bg-red-200 text-red-800";
-      bar = "bg-red-500";
-      statusLabel = `${consumed}/${limit} +${Math.abs(remaining)}`;
+    if (!state.hasLimit) {
+      statusLabel = `${state.consumed}×`;
+      progress = state.consumed > 0 ? 100 : 0;
+      bar = state.consumed > 0 ? "bg-emerald-400" : "bg-emerald-500";
+      ariaLabel = `${card.name}: consumato ${state.consumed} volta/e questa settimana, nessun limite impostato`;
+    } else {
+      const { limit, remaining } = state;
+      progress = limit > 0 ? Math.min((state.consumed / limit) * 100, 100) : 100;
+      statusLabel = `${state.consumed}/${limit}`;
+      if (remaining === 0) {
+        bg = "bg-gray-50 border-gray-200 opacity-80";
+        badge = "bg-gray-200 text-gray-600";
+        bar = "bg-gray-400";
+        statusLabel = `${state.consumed}/${limit} ✓`;
+      } else if (remaining < 0) {
+        bg = "bg-red-50 border-red-300";
+        text = "text-red-700";
+        badge = "bg-red-200 text-red-800";
+        bar = "bg-red-500";
+        statusLabel = `${state.consumed}/${limit} +${Math.abs(remaining)}`;
+      }
+      ariaLabel =
+        `${card.name}: consumati ${state.consumed} su ${limit}${state.isShared ? ' (budget condiviso di gruppo)' : ''}; ` +
+        `${remaining >= 0 ? `ne rimangono ${remaining}` : `sforato di ${Math.abs(remaining)}`}`;
     }
-
-    const ariaLabel =
-      `${config.label}: consumati ${consumed} su ${limit}${isShared ? ' (budget condiviso col gruppo salmone)' : ''}; ` +
-      `${remaining >= 0 ? `ne rimangono ${remaining}` : `sforato di ${Math.abs(remaining)}`}`;
 
     return `
       <div class="border rounded-xl p-2.5 shadow-2xs relative flex flex-col justify-between ${bg} transition-all">
         <div class="flex justify-between items-center gap-2 mb-1">
-          <span class="text-xl" aria-hidden="true">${config.emoji}</span>
+          <span class="text-xl" aria-hidden="true">${card.emoji || '🍽️'}</span>
           <span class="text-[10px] font-bold px-1.5 py-0.5 rounded-full whitespace-nowrap ${badge}"
                 aria-label="${ariaLabel}" title="${ariaLabel}">
             ${statusLabel}
@@ -438,11 +434,11 @@ export async function render(rootElement) {
         <div class="h-1 rounded-full bg-black/10 overflow-hidden mb-1.5" aria-hidden="true">
           <div class="h-full ${bar} transition-all" style="width: ${progress}%"></div>
         </div>
-        <div class="font-semibold text-xs mb-1.5 leading-tight truncate ${text}">${config.label}</div>
+        <div class="font-semibold text-xs mb-1.5 leading-tight truncate ${text}">${card.name}</div>
         <div class="flex gap-1.5">
-          <button data-action="remove" data-meal="${meal}" data-food-id="${foodId}" aria-label="Rimuovi un ${config.label}"
+          <button data-action="remove" data-section="${section}" data-food-id="${card.id}" aria-label="Rimuovi un ${card.name}"
                   class="flex-1 bg-gray-100 hover:bg-gray-200 text-gray-700 py-1 rounded-lg text-xs font-bold active:scale-95 transition-transform">−</button>
-          <button data-action="add" data-meal="${meal}" data-food-id="${foodId}" aria-label="Aggiungi un ${config.label}"
+          <button data-action="add" data-section="${section}" data-food-id="${card.id}" aria-label="Aggiungi un ${card.name}"
                   class="flex-[2] bg-emerald-600 hover:bg-emerald-700 text-white py-1 rounded-lg text-xs font-bold shadow-2xs active:scale-95 transition-transform">+</button>
         </div>
       </div>
@@ -461,10 +457,12 @@ export async function render(rootElement) {
 
       let text = "Nessun dato";
       if (record) {
-        const allEaten = [...(record.pranzo || []), ...(record.cena || [])].map(id => {
-          pastEaten.add(id);
-          return BUDGET.pranzo[id]?.label || BUDGET.cena[id]?.label || id;
-        });
+        const allEaten = ['pranzo', 'cena', 'altro'].flatMap(sec =>
+          (record[sec] || []).map(id => {
+            pastEaten.add(id);
+            return cardsById[id]?.name || id;
+          })
+        );
         if (allEaten.length > 0) text = allEaten.join(", ");
       }
       historyHTML += `<div class="grid grid-cols-[35px_1fr] gap-1 text-[11px]"><span class="font-bold text-gray-400">T-${daysAgo}</span> <span class="truncate">${text}</span></div>`;
@@ -473,9 +471,14 @@ export async function render(rootElement) {
     const hBox = document.getElementById('history-box');
     if (hBox) hBox.innerHTML = historyHTML;
 
-    const suggestions = Object.entries(BUDGET[currentMeal] || {})
-      .filter(([id, config]) => getBudgetState(currentMeal, id, config).remaining > 0 && !pastEaten.has(id))
-      .map(([, config]) => `<span class="bg-white border border-emerald-200 text-emerald-800 text-[10px] font-bold px-2 py-0.5 rounded-md shadow-2xs">${config.emoji} ${config.label}</span>`);
+    const mealCards = cardsBySection(currentMeal);
+    const counts = appState.consumedThisWeek[currentMeal] || {};
+    const suggestions = mealCards
+      .filter((card) => {
+        const state = getCardBudgetState(card, counts, mealCards);
+        return state.hasLimit && state.remaining > 0 && !pastEaten.has(card.id);
+      })
+      .map((card) => `<span class="bg-white border border-emerald-200 text-emerald-800 text-[10px] font-bold px-2 py-0.5 rounded-md shadow-2xs">${card.emoji || ''} ${card.name}</span>`);
 
     const sBox = document.getElementById('suggestions-box');
     if (sBox) {
@@ -514,7 +517,7 @@ export async function render(rootElement) {
           const allMeals = await getAll('meals');
           const record = (allMeals || []).find(m => m.id === btn.dataset.deleteMeal);
           if (!record) return;
-          await deleteMealRecord(record);
+          await deleteMealRecord(record, cardsById);
           renderAll();
         } catch (err) {
           console.warn('Errore eliminazione registrazione:', err);
@@ -552,22 +555,24 @@ export async function render(rootElement) {
 
   // -- Tasti + e − : l'interfaccia cambia solo dopo l'esito del database --
 
-  async function handleAddFood(meal, foodId) {
+  async function handleAddFood(section, foodId) {
+    const card = cardsById[foodId];
+    if (!card) return;
     try {
-      await addRecord('meals', buildQuickRecord(meal, foodId));
+      await addRecord('meals', buildQuickRecord(section, card));
     } catch (err) {
       console.warn('Errore salvataggio consumo:', err);
       alert('Salvataggio non riuscito: riprova prima di aggiungere altro.');
       return;
     }
-    applyLocalDelta(meal, foodId, +1);
+    applyLocalDelta(section, foodId, +1);
     renderAll();
   }
 
-  async function handleRemoveFood(meal, foodId) {
+  async function handleRemoveFood(section, foodId) {
     let record;
     try {
-      record = await findLatestQuickRecord(meal, foodId);
+      record = await findLatestQuickRecord(section, foodId);
     } catch (err) {
       console.warn('Errore lettura registrazioni:', err);
       alert('Non riesco a leggere il diario: riprova.');
@@ -576,7 +581,7 @@ export async function render(rootElement) {
     if (!record) return; // niente da togliere: card e diario restano coerenti
 
     try {
-      await deleteMealRecord(record);
+      await deleteMealRecord(record, cardsById);
     } catch (err) {
       console.warn('Errore cancellazione consumo:', err);
       alert('Cancellazione non riuscita: riprova.');
@@ -693,24 +698,25 @@ export async function render(rootElement) {
     if (!confirm('Genero una settimana di registrazioni dimostrative (pasti rapidi e qualche sintomo). Procedere?')) return;
 
     try {
-      const pranzoIds = Object.keys(BUDGET.pranzo);
-      const cenaIds = Object.keys(BUDGET.cena);
-      const pick = (arr, n) => arr.filter(() => Math.random() < 0.6).slice(0, n);
+      const pool = CARD_SECTIONS.map((section) => ({
+        key: section.key,
+        cards: cardsBySection(section.key),
+      })).filter((entry) => entry.cards.length > 0);
 
       for (let daysAgo = 6; daysAgo >= 0; daysAgo--) {
         const day = new Date();
         day.setDate(day.getDate() - daysAgo);
         const dateKey = getLocalISODate(day);
 
-        for (const foodId of pick(pranzoIds, 2)) {
-          const when = new Date(day); when.setHours(12, 30, 0, 0);
-          await addRecord('meals', buildQuickRecord('pranzo', foodId, when));
-          if (getMondayString(when) === appState.weekMondayId) applyLocalDelta('pranzo', foodId, +1, dateKey);
-        }
-        for (const foodId of pick(cenaIds, 2)) {
-          const when = new Date(day); when.setHours(19, 45, 0, 0);
-          await addRecord('meals', buildQuickRecord('cena', foodId, when));
-          if (getMondayString(when) === appState.weekMondayId) applyLocalDelta('cena', foodId, +1, dateKey);
+        for (const entry of pool) {
+          const perSection = entry.key === 'altro' ? 1 : 2;
+          const chosen = entry.cards.filter(() => Math.random() < 0.5).slice(0, perSection);
+          for (const card of chosen) {
+            const when = new Date(day);
+            when.setHours(entry.key === 'pranzo' ? 12 : entry.key === 'cena' ? 19 : 16, 30, 0, 0);
+            await addRecord('meals', buildQuickRecord(entry.key, card, when));
+            if (getMondayString(when) === appState.weekMondayId) applyLocalDelta(entry.key, card.id, +1, dateKey);
+          }
         }
 
         if (daysAgo % 2 === 0) {
