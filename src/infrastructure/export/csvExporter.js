@@ -1,26 +1,17 @@
 /**
  * src/infrastructure/export/csvExporter.js
  *
- * Generatore CSV client-side per FODMAP Path.
- * Produce file CSV separati per Pasti, Sintomi, Bristol e Challenge,
- * scaricabili direttamente dal browser senza alcun server esterno.
- *
- * Encoding: UTF-8 con BOM per compatibilità Excel.
- * Separatore: punto e virgola (;) per locale italiano.
+ * Generatore CSV client-side (UTF-8 BOM, separatore ";" locale IT).
+ * Le colonne riflettono i campi realmente scritti dall'app card-only:
+ * pasti a occorrenze con FODMAP e zuccheri, check-in sintomi, Bristol.
+ * I vecchi record con porzioni in grammi restano leggibili via fallback.
  */
 
 import { openDB } from '../storage/db.js';
 
-// ── Costanti ──────────────────────────────────────────────────────────────────
 const CSV_SEPARATOR = ';';
 const UTF8_BOM = '\uFEFF';
 
-// ── Utility ───────────────────────────────────────────────────────────────────
-
-/**
- * Escape di un valore per CSV: se contiene il separatore, virgolette o newline,
- * lo racchiude tra doppi apici e raddoppia le virgolette interne.
- */
 function escapeCSV(value) {
   if (value == null) return '';
   const str = String(value);
@@ -30,25 +21,14 @@ function escapeCSV(value) {
   return str;
 }
 
-/**
- * Converte un array di oggetti in stringa CSV con intestazione.
- * @param {string[]} headers - Nomi delle colonne
- * @param {Array<Object>} rows - Righe di dati
- * @param {Function} rowMapper - Funzione che converte un oggetto in array di valori
- * @returns {string} Contenuto CSV completo
- */
 function toCSV(headers, rows, rowMapper) {
   const lines = [headers.map(escapeCSV).join(CSV_SEPARATOR)];
   for (const row of rows) {
-    const values = rowMapper(row);
-    lines.push(values.map(escapeCSV).join(CSV_SEPARATOR));
+    lines.push(rowMapper(row).map(escapeCSV).join(CSV_SEPARATOR));
   }
   return UTF8_BOM + lines.join('\r\n');
 }
 
-/**
- * Formatta una data ISO in formato leggibile italiano (DD/MM/YYYY HH:mm).
- */
 function formatDate(isoString) {
   if (!isoString) return '';
   try {
@@ -64,23 +44,14 @@ function formatDate(isoString) {
   }
 }
 
-/**
- * Formatta solo la data senza orario (DD/MM/YYYY).
- */
 function formatDateOnly(isoString) {
   if (!isoString) return '';
   try {
-    const d = new Date(isoString);
-    const dd = String(d.getDate()).padStart(2, '0');
-    const mm = String(d.getMonth() + 1).padStart(2, '0');
-    const yyyy = d.getFullYear();
-    return `${dd}/${mm}/${yyyy}`;
+    return new Date(isoString).toLocaleDateString('it-IT');
   } catch {
     return isoString;
   }
 }
-
-// ── Helper per leggere tutti i record da uno store ────────────────────────────
 
 async function getAllFromStore(storeName) {
   const db = await openDB();
@@ -93,11 +64,6 @@ async function getAllFromStore(storeName) {
   });
 }
 
-/**
- * Filtra i record per intervallo temporale.
- * @param {Array} records - Record con campo timestamp o date
- * @param {number} days - Numero di giorni dal presente (0 = tutto)
- */
 function filterByPeriod(records, days, dateField = 'timestamp') {
   if (!days || days <= 0) return records;
   const cutoff = new Date();
@@ -109,57 +75,39 @@ function filterByPeriod(records, days, dateField = 'timestamp') {
   });
 }
 
-// ── Esportazione Pasti ────────────────────────────────────────────────────────
+// -- Pasti (occasioni via card) --
 
 const MEAL_HEADERS = [
   'Data e Ora',
   'Tipo Pasto',
-  'Fuori Casa',
   'Alimento',
-  'Porzione (quantità)',
-  'Unità',
-  'Preparazione',
+  'Occorrenze',
   'Gruppi FODMAP',
-  'Porzione Stimata',
+  'Zuccheri',
   'Note Pasto',
 ];
 
 function mealToRows(meal) {
+  const base = [formatDate(meal.timestamp), meal.mealType || ''];
   if (!meal.items || meal.items.length === 0) {
-    return [[
-      formatDate(meal.timestamp),
-      meal.mealType || '',
-      meal.isEatingOut ? 'Sì' : 'No',
-      '(pasto vuoto)',
-      '', '', '', '', '',
-      meal.notes || '',
-    ]];
+    return [[...base, '(registrazione vuota)', '', '', '', meal.notes || '']];
   }
   return meal.items.map((item) => [
-    formatDate(meal.timestamp),
-    meal.mealType || '',
-    meal.isEatingOut ? 'Sì' : 'No',
+    ...base,
     item.foodName || '',
-    item.consumedPortion?.amount ?? '',
-    item.consumedPortion?.unit ?? '',
-    item.preparationUsed || '',
+    // Card-only: 1 occorrenza; fallback ai grammi dei record pre-rifattorizzazione
+    item.occurrences ?? item.consumedPortion?.amount ?? 1,
     (item.fodmapGroupsSnapshot || []).join(', '),
-    item.isEstimated ? 'Sì' : 'No',
+    (item.sugarsSnapshot || []).join(', '),
     meal.notes || '',
   ]);
 }
 
-/**
- * Genera il CSV dei pasti.
- * @param {number} periodDays - Filtro temporale (0 = tutto)
- * @returns {Promise<string>} Contenuto CSV
- */
 export async function exportMealsCSV(periodDays = 0) {
   let meals = await getAllFromStore('meals');
   meals = filterByPeriod(meals, periodDays);
   meals.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
 
-  // Espandi i pasti: un pasto con N items diventa N righe
   const allRows = [];
   for (const meal of meals) {
     allRows.push(...mealToRows(meal));
@@ -172,103 +120,41 @@ export async function exportMealsCSV(periodDays = 0) {
   return lines.join('\r\n');
 }
 
-// ── Esportazione Sintomi ──────────────────────────────────────────────────────
+// -- Sintomi (check-in rapido) --
 
-const SYMPTOM_HEADERS = [
-  'Data e Ora',
-  'Tipo Check-in',
-  'Gonfiore (0-10)',
-  'Dolore Addominale (0-10)',
-  'Confronto Baseline',
-  'Nessun Sintomo',
-  'Distensione Visibile',
-  'Flatulenza',
-  'Dolore Pelvico (0-10)',
-  'Nausea (0-10)',
-  'Urgenza Evacuativa',
-  'Evacuazione Incompleta',
-  'Minuti dopo Pasto',
-  'Durata (min)',
-];
-
-/**
- * Genera il CSV dei sintomi.
- */
 export async function exportSymptomsCSV(periodDays = 0) {
   let symptoms = await getAllFromStore('symptoms');
   symptoms = filterByPeriod(symptoms, periodDays);
   symptoms.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
 
-  return toCSV(SYMPTOM_HEADERS, symptoms, (s) => [
-    formatDate(s.timestamp),
-    s.type || '',
-    s.bloatingIntensity ?? '',
-    s.abdominalPainIntensity ?? '',
-    s.generalComparisonToBaseline || '',
-    s.noSymptomsFlag ? 'Sì' : 'No',
-    s.visibleDistension == null ? '' : s.visibleDistension ? 'Sì' : 'No',
-    s.flatulenceSeverity || '',
-    s.pelvicPainIntensity ?? '',
-    s.nauseaIntensity ?? '',
-    s.evacuationUrgency == null ? '' : s.evacuationUrgency ? 'Sì' : 'No',
-    s.incompleteEvacuation == null ? '' : s.incompleteEvacuation ? 'Sì' : 'No',
-    s.onsetMinutesAfterMeal ?? '',
-    s.durationMinutes ?? '',
-  ]);
+  return toCSV(
+    ['Data e Ora', 'Tipo Check-in', 'Dolore (0-10)', 'Gonfiore (0-10)', 'Note'],
+    symptoms,
+    (s) => [
+      formatDate(s.timestamp),
+      s.type || '',
+      s.abdominalPainIntensity ?? '',
+      s.bloatingIntensity ?? '',
+      s.notes || '',
+    ]
+  );
 }
 
-// ── Esportazione Registro Alvo Bristol ────────────────────────────────────────
+// -- Registro Bristol --
 
-const BRISTOL_HEADERS = [
-  'Data e Ora',
-  'Tipo Bristol (1-7)',
-  'Urgenza',
-  'Dolore Evacuazione (0-10)',
-  'Sforzo',
-  'Evacuazione Incompleta',
-  'Muco Presente',
-  'Note',
-];
-
-/**
- * Genera il CSV del registro alvo Bristol.
- */
 export async function exportBristolCSV(periodDays = 0) {
   let events = await getAllFromStore('bowel_events');
   events = filterByPeriod(events, periodDays);
   events.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
 
-  return toCSV(BRISTOL_HEADERS, events, (e) => [
-    formatDate(e.timestamp),
-    e.bristolType ?? '',
-    e.urgency || '',
-    e.painDuringDefecation ?? '',
-    e.straining || '',
-    e.incompleteEvacuation ? 'Sì' : 'No',
-    e.mucusPresent ? 'Sì' : 'No',
-    e.notes || '',
-  ]);
+  return toCSV(
+    ['Data e Ora', 'Tipo Bristol (1-7)', 'Note'],
+    events,
+    (e) => [formatDate(e.timestamp), e.bristolType ?? '', e.notes || '']
+  );
 }
 
-// ── Esportazione Challenge ────────────────────────────────────────────────────
-
-const CHALLENGE_HEADERS = [
-  'Gruppo FODMAP',
-  'Alimento Test',
-  'Data Inizio',
-  'Stato',
-  'Dose Giorno 1',
-  'Dose Giorno 2',
-  'Dose Giorno 3',
-  'Dolore Max G1',
-  'Gonfiore Max G1',
-  'Dolore Max G2',
-  'Gonfiore Max G2',
-  'Dolore Max G3',
-  'Gonfiore Max G3',
-  'Esito',
-  'Confermato',
-];
+// -- Challenge --
 
 function formatDose(portion) {
   if (!portion) return '';
@@ -280,45 +166,41 @@ function getDayLog(challenge, day) {
   return challenge.dayLogs.find((d) => d.day === day) || {};
 }
 
-/**
- * Genera il CSV dei challenge di reintroduzione.
- */
 export async function exportChallengesCSV(periodDays = 0) {
   let challenges = await getAllFromStore('challenges');
   challenges = filterByPeriod(challenges, periodDays, 'startDate');
   challenges.sort((a, b) => (a.startDate || '').localeCompare(b.startDate || ''));
 
-  return toCSV(CHALLENGE_HEADERS, challenges, (c) => {
-    const d1 = getDayLog(c, 1);
-    const d2 = getDayLog(c, 2);
-    const d3 = getDayLog(c, 3);
-    return [
-      c.fodmapGroup || '',
-      c.testFoodName || '',
-      formatDateOnly(c.startDate),
-      c.state || '',
-      formatDose(c.doses?.day1),
-      formatDose(c.doses?.day2),
-      formatDose(c.doses?.day3),
-      d1.maxPain ?? '',
-      d1.maxBloating ?? '',
-      d2.maxPain ?? '',
-      d2.maxBloating ?? '',
-      d3.maxPain ?? '',
-      d3.maxBloating ?? '',
-      c.outcome || '',
-      c.confirmedByPatient ? 'Sì' : 'No',
-    ];
-  });
+  return toCSV(
+    ['Gruppo FODMAP', 'Alimento Test', 'Data Inizio', 'Stato',
+     'Dose G1', 'Dose G2', 'Dose G3',
+     'Dolore Max G1', 'Gonfiore Max G1',
+     'Dolore Max G2', 'Gonfiore Max G2',
+     'Dolore Max G3', 'Gonfiore Max G3', 'Esito'],
+    challenges,
+    (c) => {
+      const d1 = getDayLog(c, 1);
+      const d2 = getDayLog(c, 2);
+      const d3 = getDayLog(c, 3);
+      return [
+        c.fodmapGroup || '',
+        c.testFoodName || '',
+        formatDateOnly(c.startDate),
+        c.state || '',
+        formatDose(c.doses?.day1),
+        formatDose(c.doses?.day2),
+        formatDose(c.doses?.day3),
+        d1.maxPain ?? '', d1.maxBloating ?? '',
+        d2.maxPain ?? '', d2.maxBloating ?? '',
+        d3.maxPain ?? '', d3.maxBloating ?? '',
+        c.outcome || '',
+      ];
+    }
+  );
 }
 
-// ── Download Helper ───────────────────────────────────────────────────────────
+// -- Download --
 
-/**
- * Scarica una stringa come file CSV nel browser.
- * @param {string} csvContent - Contenuto CSV
- * @param {string} filename - Nome del file (con estensione)
- */
 export function downloadCSV(csvContent, filename) {
   const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
@@ -329,19 +211,12 @@ export function downloadCSV(csvContent, filename) {
   document.body.appendChild(link);
   link.click();
 
-  // Pulizia dopo il click
   setTimeout(() => {
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
   }, 100);
 }
 
-// ── Esportazione Completa (Tutti i CSV in un unico zip o download multiplo) ──
-
-/**
- * Genera e scarica tutti i CSV del periodo selezionato.
- * @param {number} periodDays - Filtro temporale (14, 30, 60 o 0 per tutto)
- */
 export async function exportAllCSV(periodDays = 0) {
   const suffix = periodDays > 0 ? `_${periodDays}gg` : '_completo';
   const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
