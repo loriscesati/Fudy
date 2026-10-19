@@ -67,14 +67,6 @@ export const deleteRecord = (storeName, key) => run(storeName, 'readwrite', stor
 export const getRecord = (storeName, key) => run(storeName, 'readonly', store => store.get(key));
 export const getAll = storeName => run(storeName, 'readonly', store => store.getAll());
 
-export const FoodStore = {
-  add: food => addRecord('foods', food),
-  get: id => getRecord('foods', id),
-  update: food => updateRecord('foods', food),
-  delete: id => deleteRecord('foods', id),
-  getAll: () => getAll('foods'),
-};
-
 export function uuidv4() {
   return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
     (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)

@@ -1,14 +1,15 @@
 /**
  * src/domain/foods/cardService.js
  *
- * CRUD delle card alimentari sullo store IndexedDB 'foods'
+ * Gestione delle card alimentari di Fudy sullo store IndexedDB 'foods'
  * (campo isCard: true le distingue da eventuali record legacy).
  * Include la migrazione una tantum delle card che prima erano
  * scritte nel codice della home, con riparazione idempotente
  * delle classificazioni corrette dopo la prima versione.
+ * Le card non si eliminano: si archiviano, cosi' lo storico resta leggibile.
  */
 
-import { uuidv4, getRecord, updateRecord, deleteRecord, getAll } from '../../infrastructure/storage/db.js';
+import { uuidv4, getRecord, updateRecord, getAll } from '../../infrastructure/storage/db.js';
 import { normalizeCard } from './cardModel.js';
 
 const MIGRATION_FLAG = 'fudy_cards_migration_v1';
@@ -72,10 +73,6 @@ export async function archiveCard(id) {
   record.isArchived = true;
   record.updatedAt = new Date().toISOString();
   await updateRecord('foods', record);
-}
-
-export async function deleteCard(id) {
-  await deleteRecord('foods', id);
 }
 
 /**

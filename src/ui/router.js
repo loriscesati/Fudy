@@ -1,7 +1,7 @@
 /**
  * src/ui/router.js
  *
- * Router hash-based per FODMAP Path.
+ * Router hash-based di Fudy.
  * Gestisce il caricamento dinamico delle viste e l'aggiornamento
  * degli indicatori attivi della bottom navigation bar.
  */
@@ -18,10 +18,6 @@ const routes = {
 export function initRouter() {
   window.addEventListener('hashchange', renderRoute);
   renderRoute(); // Caricamento iniziale
-}
-
-export function navigate(route) {
-  location.hash = `#${route}`;
 }
 
 async function renderRoute() {
