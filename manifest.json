@@ -1,13 +1,14 @@
 {
-  "name": "Low FODMAP Tracker",
-  "short_name": "FODMAP",
-  "description": "Tracciamento pasti settimanale per dieta low FODMAP",
+  "name": "Fudy - diario low-FODMAP",
+  "short_name": "Fudy",
+  "description": "Diario alimentare e dei sintomi per il percorso low-FODMAP. I dati restano sul tuo dispositivo.",
+  "lang": "it",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#f3f4f6",
-  "theme_color": "#f3f4f6",
+  "background_color": "#f8fafc",
+  "theme_color": "#059669",
   "icons": [
     {
       "src": "icon-192.svg",
