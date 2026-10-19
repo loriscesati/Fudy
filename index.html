@@ -4,12 +4,12 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <title>FODMAP Path — Guida & Diario Low-FODMAP</title>
+  <title>Fudy — Diario low-FODMAP</title>
 
   <!-- PWA iOS & Android Meta Tags -->
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="apple-mobile-web-app-title" content="FODMAP Path">
+  <meta name="apple-mobile-web-app-title" content="Fudy">
   <meta name="theme-color" content="#059669">
   <link rel="apple-touch-icon" href="icon-192.svg">
   <link rel="manifest" href="manifest.json">
@@ -71,7 +71,7 @@
     <div class="flex items-center gap-2">
       <span class="text-2xl">🌱</span>
       <span>
-        <h1 class="text-base font-extrabold text-emerald-700 tracking-tight leading-none">FODMAP Path</h1>
+        <h1 class="text-base font-extrabold text-emerald-700 tracking-tight leading-none">Fudy</h1>
       </span>
     </div>
     <div class="flex items-center gap-2">
@@ -80,11 +80,6 @@
         <span>⚙️</span>
         <span class="hidden sm:inline">Profilo</span>
       </a>
-      <button onclick="handleGlobalReset()"
-        class="text-xs text-red-500 hover:bg-red-50 px-2.5 py-1.5 rounded-full font-medium transition-colors"
-        title="Azzera dati locali">
-        Reset
-      </button>
     </div>
   </header>
 
@@ -178,21 +173,6 @@
       const banner = document.getElementById('pwa-update-banner');
       if (banner) banner.classList.add('hidden');
     });
-
-    // Reset Globale per test o pulizia dati
-    function handleGlobalReset() {
-      if (confirm("Vuoi cancellare tutti i dati locali memorizzati nel browser (IndexedDB + cache)?")) {
-        localStorage.clear();
-        indexedDB.deleteDatabase('fodmap-path-db');
-        if ('caches' in window) {
-          caches.keys().then((names) => {
-            names.forEach((name) => caches.delete(name));
-          });
-        }
-        location.hash = '#home';
-        location.reload();
-      }
-    }
   </script>
 
   <!-- Caricamento del Router come modulo ES -->

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'fodmap-path-v20';
+const CACHE_NAME = 'fodmap-path-v21';
 const FILES_TO_CACHE = [
   './', './index.html', './manifest.json', './icon-192.svg', './icon-512.svg',
   './src/infrastructure/storage/db.js', './src/infrastructure/storage/userProfile.js',
