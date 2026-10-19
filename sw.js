@@ -1,6 +1,6 @@
 // Service Worker per FODMAP Path PWA
 // Incrementa CACHE_NAME ad ogni modifica per forzare il refresh
-const CACHE_NAME = 'fodmap-path-v14';
+const CACHE_NAME = 'fodmap-path-v15';
 
 const FILES_TO_CACHE = [
   './',

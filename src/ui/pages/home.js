@@ -11,11 +11,15 @@
  * Il check-in sintomi e' multidimensionale (dolore addominale, gonfiore,
  * dolore pelvico, endo-belly, dischezia) e raccoglie i confondenti
  * giornalieri usati dal motore di analisi.
+ * La home mostra il contatore delle settimane di riduzione (fase 1) e
+ * una nota anti-stacking se in giornata sono stati toccati piu' gruppi
+ * FODMAP diversi.
  */
 
 import { addRecord, deleteRecord, updateRecord, getRecord, uuidv4, getAll } from '../../infrastructure/storage/db.js';
-import { getProfile } from '../../infrastructure/storage/userProfile.js';
+import { getProfile, setProfile } from '../../infrastructure/storage/userProfile.js';
 import { getCards, migrateLegacyCards } from '../../domain/foods/cardService.js';
+import { FODMAP_GROUPS } from '../../domain/foods/foodService.js';
 import {
   CARD_SECTIONS,
   SECTION_KEYS,
@@ -32,16 +36,15 @@ const MEAL_TYPES = [
 ];
 
 const HISTORY_RETENTION_DAYS = 90;
+const REDUCTION_RECOMMENDED_WEEKS = 6;
+const STACKING_WARN_GROUPS = 2;
 
-// Stato in memoria, derivato dal diario: mai persistito altrove
 let appState = {
   weekMondayId: "",
   consumedThisWeek: { pranzo: {}, cena: {}, altro: {} },
   history: {},
   activeMeal: null
 };
-
-// -- Date helper --
 
 function getLocalISODate(d = new Date()) {
   return new Date(d.getTime() - (d.getTimezoneOffset() * 60000)).toISOString().split('T')[0];
@@ -162,6 +165,47 @@ async function deleteMealRecord(record, cardsById) {
   applyLocalDelta(section, item.foodId, -1, getLocalISODate(new Date(record.timestamp)), touchesCurrentWeek);
 }
 
+// -- Contatore della fase di riduzione (passo timer) --
+
+/**
+ * Garantisce una data di inizio alla fase di riduzione e calcola
+ * la settimana corrente. Se la scrittura fallisce, si ripiega su
+ * oggi senza bloccare la pagina.
+ */
+async function resolvePhaseTimer(profile) {
+  if (profile.phase !== 'REDUCTION') return null;
+
+  if (!profile.phaseStartedAt) {
+    profile.phaseStartedAt = getLocalISODate();
+    try {
+      await setProfile(profile);
+    } catch (err) {
+      console.warn('Impossibile salvare la data di inizio fase:', err);
+    }
+  }
+
+  const started = new Date(profile.phaseStartedAt);
+  if (isNaN(started)) return null;
+  const week = Math.floor((Date.now() - started.getTime()) / 604800000) + 1;
+  return { week };
+}
+
+function phaseTimerHTML(timer) {
+  if (!timer) return '';
+  const overRun = timer.week > REDUCTION_RECOMMENDED_WEEKS;
+  const cls = overRun
+    ? 'bg-amber-50 border-amber-200 text-amber-900'
+    : 'bg-emerald-50 border-emerald-100 text-emerald-900';
+  const note = overRun
+    ? 'La riduzione dura in genere 4-6 settimane: valuta con il tuo professionista il passaggio alla reintroduzione.'
+    : 'Periodo consigliato: 4-6 settimane. Poi si passa alla reintroduzione guidata.';
+  return `
+    <div class="rounded-xl border px-3 py-2 text-[11px] leading-snug ${cls}">
+      <span class="font-bold">Fase di riduzione: settimana ${timer.week}</span>
+      <span class="block opacity-80">${note}</span>
+    </div>`;
+}
+
 // -- Pagina --
 
 export async function render(rootElement) {
@@ -175,6 +219,13 @@ export async function render(rootElement) {
   }
   const cards = await getCards();
   const cardsById = Object.fromEntries(cards.map((c) => [c.id, c]));
+
+  let phaseTimer = null;
+  try {
+    phaseTimer = await resolvePhaseTimer(profile);
+  } catch (err) {
+    console.warn('Timer di fase non disponibile:', err);
+  }
 
   try {
     await rebuildStateFromDiary();
@@ -240,6 +291,8 @@ export async function render(rootElement) {
         </button>
       </div>
 
+      ${phaseTimerHTML(phaseTimer)}
+
       <div class="flex gap-2">
         <button id="btn-open-history" class="flex-1 bg-white border border-gray-200 hover:bg-gray-50 text-gray-700 font-bold py-2.5 px-3.5 rounded-xl shadow-xs active:scale-95 transition-all flex items-center justify-center gap-1.5 text-xs">
           <span>📖</span>
@@ -257,6 +310,7 @@ export async function render(rootElement) {
         <div id="today-meals-list" class="space-y-2 text-xs">
           <p class="text-gray-400 italic py-2 text-center">Nessuna registrazione oggi. Usa le card qui sotto.</p>
         </div>
+        <div id="stack-note" class="hidden mt-2.5 rounded-xl border border-amber-200 bg-amber-50 px-2.5 py-2 text-[11px] text-amber-900"></div>
       </section>
 
       <section class="bg-emerald-50/80 border border-emerald-100 rounded-2xl p-4 shadow-sm">
@@ -443,7 +497,6 @@ export async function render(rootElement) {
     let bar = "bg-emerald-500";
     let statusLabel;
     let ariaLabel;
-    // La barra di avanzamento esiste solo se c'e' un budget da riempire
     let statusBarHTML = '';
 
     if (!state.hasLimit) {
@@ -577,6 +630,31 @@ export async function render(rootElement) {
     });
   }
 
+  // Nota anti-stacking: conta i gruppi FODMAP diversi toccati oggi
+  function updateStackNote(todayMeals) {
+    const note = document.getElementById('stack-note');
+    if (!note) return;
+
+    const groups = new Set();
+    for (const m of todayMeals) {
+      for (const item of (m.items || [])) {
+        for (const g of (item.fodmapGroupsSnapshot || [])) {
+          if (g !== 'LOW_FODMAP_SAFE') groups.add(g);
+        }
+      }
+    }
+
+    if (groups.size < STACKING_WARN_GROUPS) {
+      note.classList.add('hidden');
+      note.textContent = '';
+      return;
+    }
+
+    const names = [...groups].map((g) => FODMAP_GROUPS.find((fg) => fg.id === g)?.label.split(' ')[0] || g);
+    note.classList.remove('hidden');
+    note.textContent = `Oggi hai toccato ${groups.size} gruppi FODMAP diversi (${names.join(', ')}). Se sei sensibile allo stacking, valuta di distanziare le prossime fonti o di fermarti qui.`;
+  }
+
   async function refreshTodayMeals() {
     const listDiv = document.getElementById('today-meals-list');
     const countSpan = document.getElementById('today-meals-count');
@@ -590,6 +668,7 @@ export async function render(rootElement) {
         .sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
 
       countSpan.textContent = `${todayMeals.length} registrazioni`;
+      updateStackNote(todayMeals);
 
       if (todayMeals.length === 0) {
         listDiv.innerHTML = '<p class="text-gray-400 italic py-2 text-center text-xs">Nessuna registrazione oggi. Usa le card qui sotto.</p>';
@@ -628,7 +707,7 @@ export async function render(rootElement) {
       alert('Non riesco a leggere il diario: riprova.');
       return;
     }
-    if (!record) return; // niente da togliere: card e diario restano coerenti
+    if (!record) return;
 
     try {
       await deleteMealRecord(record, cardsById);
