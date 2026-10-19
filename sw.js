@@ -1,10 +1,11 @@
-const CACHE_NAME = 'fodmap-path-v16';
+const CACHE_NAME = 'fodmap-path-v17';
 const FILES_TO_CACHE = [
   './', './index.html', './manifest.json', './icon-192.svg', './icon-512.svg',
   './src/infrastructure/storage/db.js', './src/infrastructure/storage/userProfile.js',
   './src/infrastructure/export/csvExporter.js', './src/infrastructure/export/pdfExporter.js',
   './src/domain/insights/associationEngine.js', './src/domain/insights/statisticsCore.js',
-  './src/domain/insights/observedAssociations.js', './src/domain/foods/foodService.js',
+  './src/domain/insights/observedAssociations.js', './src/domain/insights/reportStats.js',
+  './src/domain/foods/foodService.js',
   './src/domain/foods/cardModel.js', './src/domain/foods/cardService.js',
   './src/domain/challenge/challengeService.js', './src/ui/router.js', './src/ui/onboarding.js',
   './src/ui/pages/home.js', './src/ui/pages/alimenti.js', './src/ui/pages/challenge.js', './src/ui/pages/progressi.js'
