@@ -1,4 +1,4 @@
-const CACHE_NAME = 'fodmap-path-v21';
+const CACHE_NAME = 'fodmap-path-v22';
 const FILES_TO_CACHE = [
   './', './index.html', './manifest.json', './icon-192.svg', './icon-512.svg',
   './src/infrastructure/storage/db.js', './src/infrastructure/storage/userProfile.js',
@@ -10,6 +10,8 @@ const FILES_TO_CACHE = [
   './src/domain/insights/dayFactors.js', './src/domain/insights/phaseTimer.js',
   './src/domain/foods/foodService.js', './src/domain/foods/cardModel.js', './src/domain/foods/cardService.js',
   './src/domain/challenge/challengeService.js', './src/ui/router.js', './src/ui/onboarding.js',
+  './src/ui/components/symptomSliders.js', './src/ui/components/undoNotice.js',
+  './src/ui/components/responsiveLayout.js',
   './src/ui/pages/home.js', './src/ui/pages/alimenti.js', './src/ui/pages/challenge.js',
   './src/ui/pages/progressi.js', './src/ui/pages/backup.js'
 ];
