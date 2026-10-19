@@ -1,7 +1,8 @@
-const CACHE_NAME = 'fodmap-path-v19';
+const CACHE_NAME = 'fodmap-path-v20';
 const FILES_TO_CACHE = [
   './', './index.html', './manifest.json', './icon-192.svg', './icon-512.svg',
   './src/infrastructure/storage/db.js', './src/infrastructure/storage/userProfile.js',
+  './src/infrastructure/storage/backupService.js', './src/domain/backupCore.js',
   './src/infrastructure/export/csvExporter.js', './src/infrastructure/export/pdfExporter.js',
   './src/domain/insights/statisticsCore.js', './src/domain/insights/occasions.js',
   './src/domain/insights/associationCore.js', './src/domain/insights/trends.js',
@@ -9,7 +10,8 @@ const FILES_TO_CACHE = [
   './src/domain/insights/dayFactors.js', './src/domain/insights/phaseTimer.js',
   './src/domain/foods/foodService.js', './src/domain/foods/cardModel.js', './src/domain/foods/cardService.js',
   './src/domain/challenge/challengeService.js', './src/ui/router.js', './src/ui/onboarding.js',
-  './src/ui/pages/home.js', './src/ui/pages/alimenti.js', './src/ui/pages/challenge.js', './src/ui/pages/progressi.js'
+  './src/ui/pages/home.js', './src/ui/pages/alimenti.js', './src/ui/pages/challenge.js',
+  './src/ui/pages/progressi.js', './src/ui/pages/backup.js'
 ];
 self.addEventListener('message', event => { if (event.data?.type === 'SKIP_WAITING') self.skipWaiting(); });
 self.addEventListener('install', event => event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(FILES_TO_CACHE))));

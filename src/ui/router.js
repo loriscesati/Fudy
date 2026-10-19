@@ -11,6 +11,7 @@ const routes = {
   alimenti: () => import('./pages/alimenti.js'),
   challenge: () => import('./pages/challenge.js'),
   progressi: () => import('./pages/progressi.js'),
+  backup: () => import('./pages/backup.js'),
   onboarding: () => import('./onboarding.js'),
 };
 

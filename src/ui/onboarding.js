@@ -92,5 +92,9 @@ export async function render(root) {
       console.error(error);
     } finally { button.disabled = false; }
   });
-  section.appendChild(form); root.appendChild(section);
+  const backupLink = document.createElement('a');
+  backupLink.href = '#backup';
+  backupLink.textContent = 'Backup e ripristino dei dati';
+  backupLink.className = 'block text-sm underline text-emerald-700';
+  section.appendChild(form); section.appendChild(backupLink); root.appendChild(section);
 }
