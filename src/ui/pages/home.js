@@ -8,18 +8,18 @@
  *
  * Single source of truth: contatori settimanali e storico derivano
  * SEMPRE dai record del diario in IndexedDB (ricalcolati al caricamento).
- * Il check-in sintomi e' multidimensionale (dolore addominale, gonfiore,
- * dolore pelvico, endo-belly, dischezia) e raccoglie i confondenti
- * giornalieri usati dal motore di analisi.
- * La home mostra il contatore delle settimane di riduzione (fase 1) e
- * una nota anti-stacking se in giornata sono stati toccati piu' gruppi
- * FODMAP diversi.
+ * Il check-in sintomi e' multidimensionale e mostra i fattori gia' indicati
+ * per la giornata, cosi' un nuovo check-in non li cancella in silenzio.
+ * Il banner di fase usa solo le date indicate nel profilo: nessuna data
+ * viene inventata o salvata dalla home.
  */
 
 import { addRecord, deleteRecord, updateRecord, getRecord, uuidv4, getAll } from '../../infrastructure/storage/db.js';
-import { getProfile, setProfile } from '../../infrastructure/storage/userProfile.js';
+import { getProfile } from '../../infrastructure/storage/userProfile.js';
 import { getCards, migrateLegacyCards } from '../../domain/foods/cardService.js';
 import { FODMAP_GROUPS } from '../../domain/foods/foodService.js';
+import { describePhase } from '../../domain/insights/phaseTimer.js';
+import { FACTOR_KEYS, recordToFlags, flagsToRecord } from '../../domain/insights/dayFactors.js';
 import {
   CARD_SECTIONS,
   SECTION_KEYS,
@@ -36,7 +36,6 @@ const MEAL_TYPES = [
 ];
 
 const HISTORY_RETENTION_DAYS = 90;
-const REDUCTION_RECOMMENDED_WEEKS = 6;
 const STACKING_WARN_GROUPS = 2;
 
 let appState = {
@@ -165,44 +164,34 @@ async function deleteMealRecord(record, cardsById) {
   applyLocalDelta(section, item.foodId, -1, getLocalISODate(new Date(record.timestamp)), touchesCurrentWeek);
 }
 
-// -- Contatore della fase di riduzione (passo timer) --
+// -- Banner di fase: solo date indicate dall'utente --
 
-/**
- * Garantisce una data di inizio alla fase di riduzione e calcola
- * la settimana corrente. Se la scrittura fallisce, si ripiega su
- * oggi senza bloccare la pagina.
- */
-async function resolvePhaseTimer(profile) {
-  if (profile.phase !== 'REDUCTION') return null;
-
-  if (!profile.phaseStartedAt) {
-    profile.phaseStartedAt = getLocalISODate();
-    try {
-      await setProfile(profile);
-    } catch (err) {
-      console.warn('Impossibile salvare la data di inizio fase:', err);
-    }
+function phaseBannerHTML(info, label) {
+  if (!info) return '';
+  const fmt = (ms) => new Date(ms).toLocaleDateString('it-IT');
+  if (!info.startKnown) {
+    const why = info.startFuture ? 'La data di inizio indicata e\' nel futuro.' : 'Nessuna data di inizio indicata.';
+    return `
+    <div class="rounded-xl border px-3 py-2 text-[11px] leading-snug bg-gray-50 border-gray-200 text-gray-800">
+      <span class="font-bold">${label}</span>
+      <span class="block opacity-80">${why} <a href="#onboarding" class="underline font-semibold">Aggiorna il profilo</a> per vedere le settimane trascorse.</span>
+    </div>`;
   }
-
-  const started = new Date(profile.phaseStartedAt);
-  if (isNaN(started)) return null;
-  const week = Math.floor((Date.now() - started.getTime()) / 604800000) + 1;
-  return { week };
-}
-
-function phaseTimerHTML(timer) {
-  if (!timer) return '';
-  const overRun = timer.week > REDUCTION_RECOMMENDED_WEEKS;
-  const cls = overRun
-    ? 'bg-amber-50 border-amber-200 text-amber-900'
-    : 'bg-emerald-50 border-emerald-100 text-emerald-900';
-  const note = overRun
-    ? 'La riduzione dura in genere 4-6 settimane: valuta con il tuo professionista il passaggio alla reintroduzione.'
-    : 'Periodo consigliato: 4-6 settimane. Poi si passa alla reintroduzione guidata.';
+  const lines = [];
+  if (info.startEstimated) lines.push('Data di inizio approssimativa.');
+  if (info.plannedEnd != null) {
+    lines.push(info.plannedEndPassed
+      ? `Il termine che avevi indicato (${fmt(info.plannedEnd)}) e' passato: puoi prorogarlo o cambiare fase dal profilo. Nessun passaggio e' automatico.`
+      : `Termine che hai indicato: ${fmt(info.plannedEnd)}.`);
+  }
+  if (info.reductionReview) {
+    lines.push('Riduzione oltre le 6 settimane: rivaluta benefici e sostenibilita con il tuo professionista, anche se hai prorogato il termine.');
+  }
+  const tone = info.reductionReview ? 'bg-amber-50 border-amber-200 text-amber-900' : 'bg-emerald-50 border-emerald-100 text-emerald-900';
   return `
-    <div class="rounded-xl border px-3 py-2 text-[11px] leading-snug ${cls}">
-      <span class="font-bold">Fase di riduzione: settimana ${timer.week}</span>
-      <span class="block opacity-80">${note}</span>
+    <div class="rounded-xl border px-3 py-2 text-[11px] leading-snug ${tone}">
+      <span class="font-bold">${label}: settimana ${info.week}</span>
+      ${lines.map((l) => `<span class="block opacity-80">${l}</span>`).join('')}
     </div>`;
 }
 
@@ -220,13 +209,6 @@ export async function render(rootElement) {
   const cards = await getCards();
   const cardsById = Object.fromEntries(cards.map((c) => [c.id, c]));
 
-  let phaseTimer = null;
-  try {
-    phaseTimer = await resolvePhaseTimer(profile);
-  } catch (err) {
-    console.warn('Timer di fase non disponibile:', err);
-  }
-
   try {
     await rebuildStateFromDiary();
   } catch (err) {
@@ -240,6 +222,7 @@ export async function render(rootElement) {
     PERSONALIZATION: 'Fase 3: Personalizzazione'
   };
   const phaseLabel = phaseNames[profile.phase] || 'Fase: Inizio Percorso';
+  const phaseInfo = describePhase(profile);
 
   const sectionTitles = {
     pranzo: '☀️ Tap Rapido Pranzo',
@@ -291,7 +274,7 @@ export async function render(rootElement) {
         </button>
       </div>
 
-      ${phaseTimerHTML(phaseTimer)}
+      ${phaseBannerHTML(phaseInfo, phaseLabel)}
 
       <div class="flex gap-2">
         <button id="btn-open-history" class="flex-1 bg-white border border-gray-200 hover:bg-gray-50 text-gray-700 font-bold py-2.5 px-3.5 rounded-xl shadow-xs active:scale-95 transition-all flex items-center justify-center gap-1.5 text-xs">
@@ -310,7 +293,7 @@ export async function render(rootElement) {
         <div id="today-meals-list" class="space-y-2 text-xs">
           <p class="text-gray-400 italic py-2 text-center">Nessuna registrazione oggi. Usa le card qui sotto.</p>
         </div>
-        <div id="stack-note" class="hidden mt-2.5 rounded-xl border border-amber-200 bg-amber-50 px-2.5 py-2 text-[11px] text-amber-900"></div>
+        <div id="stack-note" class="hidden mt-2.5 rounded-xl border border-gray-200 bg-gray-50 px-2.5 py-2 text-[11px] text-gray-700"></div>
       </section>
 
       <section class="bg-emerald-50/80 border border-emerald-100 rounded-2xl p-4 shadow-sm">
@@ -407,7 +390,7 @@ export async function render(rootElement) {
 
           <div>
             <label class="block font-semibold text-gray-700 mb-1">Fattori del giorno che possono interferire</label>
-            <p class="text-[10px] text-gray-400 mb-1">Servono a non attribuire ai cibi sintomi dovuti ad altro.</p>
+            <p class="text-[10px] text-gray-400 mb-1">Valgono per tutta la giornata: se li hai già indicati li ritrovi spuntati e puoi modificarli. Servono a non attribuire ai cibi sintomi dovuti ad altro.</p>
             <div class="grid grid-cols-1 gap-1.5 p-2 bg-amber-50/60 border border-amber-100 rounded-xl text-[11px]">
               ${confounderCheckboxesHTML}
             </div>
@@ -630,7 +613,8 @@ export async function render(rootElement) {
     });
   }
 
-  // Nota anti-stacking: conta i gruppi FODMAP diversi toccati oggi
+  // Riepilogo neutro: conta i gruppi FODMAP diversi registrati oggi. Non misura
+  // quantita' ne' vicinanza temporale, quindi non e' una misura di stacking.
   function updateStackNote(todayMeals) {
     const note = document.getElementById('stack-note');
     if (!note) return;
@@ -652,7 +636,7 @@ export async function render(rootElement) {
 
     const names = [...groups].map((g) => FODMAP_GROUPS.find((fg) => fg.id === g)?.label.split(' ')[0] || g);
     note.classList.remove('hidden');
-    note.textContent = `Oggi hai toccato ${groups.size} gruppi FODMAP diversi (${names.join(', ')}). Se sei sensibile allo stacking, valuta di distanziare le prossime fonti o di fermarti qui.`;
+    note.textContent = `Oggi hai registrato ${groups.size} gruppi FODMAP diversi (${names.join(', ')}). E' solo un riepilogo: non indica le quantita' ne' il tempo tra le fonti. Se compaiono sintomi, annotali nel check-in.`;
   }
 
   async function refreshTodayMeals() {
@@ -732,7 +716,7 @@ export async function render(rootElement) {
     renderAll();
   });
 
-  // -- Modal Sintomi (multidimensionale + confondenti giornalieri) --
+  // -- Modal Sintomi (multidimensionale + fattori del giorno) --
 
   const symptomModal = document.getElementById('symptom-modal');
   const formSymptom = document.getElementById('form-symptom');
@@ -750,24 +734,38 @@ export async function render(rootElement) {
     document.getElementById('val-pelvic').textContent = pelvicInput.value;
   });
 
-  document.getElementById('btn-quick-symptom')?.addEventListener('click', () => symptomModal.showModal());
+  function applyFlagsToForm(flags) {
+    for (const key of FACTOR_KEYS) {
+      const box = document.querySelector(`[name="conf-${key}"]`);
+      if (box) box.checked = !!flags[key];
+    }
+  }
+
+  function readConfoundersFromForm() {
+    const flags = {};
+    for (const key of FACTOR_KEYS) {
+      flags[key] = document.querySelector(`[name="conf-${key}"]`)?.checked || false;
+    }
+    return flags;
+  }
+
+  // Mostra i fattori gia' indicati oggi: salvare un nuovo check-in non li cancella in silenzio.
+  document.getElementById('btn-quick-symptom')?.addEventListener('click', async () => {
+    try {
+      const stored = await getRecord('confounders', getLocalISODate());
+      applyFlagsToForm(recordToFlags(stored));
+    } catch (err) {
+      console.warn('Lettura fattori del giorno non riuscita:', err);
+    }
+    symptomModal.showModal();
+  });
   document.getElementById('btn-close-symptom')?.addEventListener('click', () => symptomModal.close());
   symptomModal?.addEventListener('click', (e) => { if (e.target === symptomModal) symptomModal.close(); });
 
-  function readConfoundersFromForm() {
-    return {
-      stressLevel: document.querySelector('[name="conf-stressLevel"]')?.checked ? 'HIGH' : 'NORMAL',
-      alcoholIntake: document.querySelector('[name="conf-alcoholIntake"]')?.checked || false,
-      travelOrRoutineChange: document.querySelector('[name="conf-travelOrRoutineChange"]')?.checked || false,
-      heavyMealConsumed: document.querySelector('[name="conf-heavyMealConsumed"]')?.checked || false,
-      intercurrentIllness: document.querySelector('[name="conf-intercurrentIllness"]')?.checked || false,
-    };
-  }
-
   async function saveConfoundersForToday(flags) {
     const today = getLocalISODate();
-    const existing = (await getRecord('confounders', today)) || { date: today };
-    await updateRecord('confounders', { ...existing, ...flags });
+    const existing = await getRecord('confounders', today);
+    await updateRecord('confounders', flagsToRecord(today, flags, existing || {}));
   }
 
   async function saveCheckin({ pain, bloat, pelvic, endoBelly, dyschezia, bristol, confounders, notes }) {
